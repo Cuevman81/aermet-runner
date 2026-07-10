@@ -280,3 +280,14 @@ analyses that use the output.
 
 Processed output is only as good as its inputs and the automated defaults — review
 the QA summary and the **Notes & limits** above before regulatory use.
+
+---
+
+## Contact
+
+Questions, comments, or bug reports are welcome:
+
+**Rodney Cuevas**<br>
+Branch Manager, Air Quality Management Branch<br>
+Mississippi Department of Environmental Quality — Air Division<br>
+📧 [RCuevas@mdeq.ms.gov](mailto:RCuevas@mdeq.ms.gov?subject=AERMET%20Runner)
