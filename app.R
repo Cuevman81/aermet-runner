@@ -58,6 +58,8 @@ ui <- fluidPage(
       selectInput("state", "State", choices = NULL, selectize = FALSE),
       leafletOutput("map", height = "260px"),
       selectizeInput("station", "ASOS Station (ICAO)", choices = NULL),
+      textInput("stations_extra", "Also process (optional)",
+                placeholder = "more ICAOs, comma-separated: KGPT, KMEI, KTUP"),
       fluidRow(
         column(6, numericInput("y1", "Start year", value = CUR_YEAR - 5,
                                min = 2000, max = CUR_YEAR, step = 1)),
@@ -66,7 +68,8 @@ ui <- fluidPage(
       tags$b("AERSURFACE options"),
       fluidRow(
         column(6, selectInput("moisture", "Surface moisture",
-                              c("Average" = "AVERAGE", "Dry" = "DRY", "Wet" = "WET"))),
+                              c("Auto (from rainfall)" = "AUTO", "Average" = "AVERAGE",
+                                "Dry" = "DRY", "Wet" = "WET"))),
         column(6, div(style = "margin-top:26px;",
                checkboxInput("snow", "Continuous winter snow", FALSE),
                checkboxInput("arid", "Arid climate", FALSE),
@@ -109,7 +112,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   surf <- reactiveVal(NULL); igra <- reactiveVal(NULL)
   logbuf <- reactiveVal(character(0))
-  result <- reactiveVal(NULL)
+  results <- reactiveVal(NULL)   # named list of per-station result objects
   addlog <- function(...) {
     logbuf(c(logbuf(), sprintf("[%s] %s", format(Sys.time(), "%H:%M:%S"), paste0(...))))
   }
@@ -185,54 +188,75 @@ server <- function(input, output, session) {
 
   output$log_text <- renderText(paste(logbuf(), collapse = "\n"))
 
-  # ---- run ----------------------------------------------------------------
+  parse_icaos <- function(txt) {
+    txt <- trimws(txt %||% ""); if (!nzchar(txt)) return(character(0))
+    toupper(unique(trimws(strsplit(txt, "[ ,;\n\t]+")[[1]])))
+  }
+
+  # ---- run (single station or batch) --------------------------------------
   observeEvent(input$run, {
     req(input$station, input$station != "")
-    icao <- input$station
     y1 <- as.integer(input$y1); y2 <- as.integer(input$y2)
     if (is.na(y1) || is.na(y2) || y2 < y1 || y2 > CUR_YEAR) {
       addlog("Invalid year range."); return()
     }
-    result(NULL)
+    icaos <- unique(c(toupper(input$station), parse_icaos(input$stations_extra)))
+    icaos <- icaos[nzchar(icaos)]
+    results(NULL)
     opts <- list(moisture = input$moisture, snow = isTRUE(input$snow),
                  arid = isTRUE(input$arid), airport = isTRUE(input$airport),
                  sectors = parse_sectors(input$sectors))
-    addlog(sprintf("=== Building %s  %d-%d ===", icao, y1, y2))
-    shinyjs_disable <- NULL  # (kept simple; button remains, run is synchronous)
+    addlog(sprintf("=== Building %d station(s): %s  |  %d-%d ===",
+                   length(icaos), paste(icaos, collapse = ", "), y1, y2))
 
-    withProgress(message = paste("Building", icao), value = 0, {
-      cb <- function(msg, frac) {
-        setProgress(value = max(0, min(1, frac)), detail = msg)
-        addlog(msg)
-      }
-      res <- tryCatch(
-        run_full_pipeline(icao, y1, y2, output_root = input$outdir, aers_opts = opts, progress = cb),
-        error = function(e) { addlog("FAILED: ", conditionMessage(e)); NULL })
-      if (!is.null(res)) {
-        addlog("SUCCESS. Output: ", res$output_dir)
-        result(res)
+    collected <- list(); n <- length(icaos)
+    withProgress(message = "Building met data", value = 0, {
+      for (k in seq_len(n)) {
+        ic <- icaos[k]
+        addlog(sprintf("--- [%d/%d] %s ---", k, n, ic))
+        cb <- function(msg, frac) {
+          setProgress(value = max(0, min(1, (k - 1 + frac) / n)),
+                      detail = sprintf("%s: %s", ic, msg))
+          addlog(msg)
+        }
+        res <- tryCatch(
+          run_full_pipeline(ic, y1, y2, output_root = input$outdir, aers_opts = opts, progress = cb),
+          error = function(e) { addlog(sprintf("%s FAILED: %s", ic, conditionMessage(e))); NULL })
+        if (!is.null(res)) {
+          addlog(sprintf("%s done (moisture %s). Output: %s", ic, res$moisture, res$output_dir))
+          collected[[ic]] <- res
+        }
       }
     })
+    results(collected)
+    addlog(sprintf("=== Batch complete: %d/%d succeeded ===", length(collected), n))
   })
 
   output$result_ui <- renderUI({
-    res <- result(); if (is.null(res)) return(NULL)
-    miss <- res$missing_asos_months
+    rs <- results(); if (is.null(rs) || length(rs) == 0) return(NULL)
+    single <- length(rs) == 1
+    rows <- lapply(rs, function(res) {
+      miss <- res$missing_asos_months
+      tags$li(
+        tags$b(sprintf("%s %d-%d", res$icao, res$years[1], res$years[2])),
+        sprintf(" — moisture %s", res$moisture %||% "?"),
+        if (length(miss)) tags$span(class = "muted",
+          sprintf("  (1-min ASOS gap: %s)", paste(miss, collapse = ", "))) else NULL,
+        tags$br(), tags$code(res$output_dir))
+    })
     tagList(
-      tags$h4("Build complete"),
-      tags$p(class = "muted", sprintf(
-        "%s %d-%d · built with EPA AERMET/AERMINUTE/AERSURFACE %s, NLCD %d",
-        res$icao, res$years[1], res$years[2], ENGINE_VERSION, NLCD_YEAR)),
-      tags$p(tags$b("Output folder: "), tags$code(res$output_dir)),
-      if (length(miss)) tags$p(class = "muted",
-        tags$b("Note: "), "1-min ASOS was unavailable at NCEI for ",
-        paste(miss, collapse = ", "), " (archive gap; those months are omitted).") else NULL,
-      if (!is.na(res$zip_path)) downloadButton("dl", "Download zip") else NULL
+      tags$h4(sprintf("Build complete — %d station(s)", length(rs))),
+      tags$p(class = "muted", sprintf("EPA AERMET/AERMINUTE/AERSURFACE %s · NLCD %d",
+                                      ENGINE_VERSION, NLCD_YEAR)),
+      tags$ul(rows),
+      if (single && !is.na(rs[[1]]$zip_path)) downloadButton("dl", "Download zip")
+      else tags$p(class = "muted",
+        "Each station folder above holds its AERMOD-ready met files and a zip.")
     )
   })
   output$dl <- downloadHandler(
-    filename = function() basename(result()$zip_path),
-    content = function(file) file.copy(result()$zip_path, file, overwrite = TRUE)
+    filename = function() basename(results()[[1]]$zip_path),
+    content = function(file) file.copy(results()[[1]]$zip_path, file, overwrite = TRUE)
   )
 }
 

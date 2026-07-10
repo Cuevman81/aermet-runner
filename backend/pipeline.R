@@ -85,6 +85,19 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   opts <- default_aersurface_opts(st$lat)
   if (!is.null(aers_opts)) opts <- modifyList(opts, aers_opts)
 
+  # Auto surface moisture from the site's rainfall record (EPA 30/70 percentile rule)
+  moisture_info <- NULL
+  if (identical(toupper(opts$moisture %||% ""), "AUTO")) {
+    progress("Determining surface moisture from rainfall ...", 0.03)
+    mc <- classify_moisture(y1:y2, st$ghcnh_id, cache_dir)
+    opts$moisture <- mc$overall
+    moisture_info <- mc
+    progress(sprintf("Auto moisture -> %s  (%s)", mc$overall, mc$note), 0.04)
+    if (isTRUE(mc$ok)) for (i in seq_len(nrow(mc$per_year)))
+      progress(sprintf("   %d: %.1f in -> %s", mc$per_year$year[i],
+                       mc$per_year$precip_in[i], mc$per_year$class[i]), 0.04)
+  }
+
   # Per-run output folder = <output_root>/<ICAO>_<y1>_<y2>
   run_dir <- file.path(output_root, sprintf("%s_%d_%d", icao, y1, y2))
   dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
@@ -133,5 +146,6 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
        station_dir = paths$station_dir,
        zip_path = if (is.na(zip_path)) NA else normalizePath(zip_path),
        missing_asos_months = missing,
+       moisture = opts$moisture, moisture_info = moisture_info,
        icao = icao, years = c(y1, y2))
 }

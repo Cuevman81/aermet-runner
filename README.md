@@ -75,6 +75,10 @@ shiny::runApp()
 or open `app.R` in RStudio and click **Run App**. Pick a state → station (map or
 dropdown) → year range → options → **Build met data**.
 
+**Multiple stations:** pick one station, then list additional ICAOs in the
+**"Also process"** box (comma-separated, e.g. `KGPT, KMEI, KTUP`). The app runs
+each in turn and writes a separate output folder per station.
+
 You can also run it headless:
 ```r
 APP_ROOT <- normalizePath(".")
@@ -97,7 +101,11 @@ runs/<ICAO>_<y1>_<y2>/
 
 The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:
 
-- **Surface moisture** — Average / Dry / Wet.
+- **Surface moisture** — **Auto (from rainfall)** by default, or Average / Dry / Wet.
+  Auto follows EPA guidance: it pulls the site's own GHCN-Daily annual precipitation,
+  builds a 30-year climatology, and classifies the modeled period — wettest 30% →
+  **wet**, driest 30% → **dry**, middle 40% → **average**. The per-year totals and
+  thresholds are printed to the run log so the basis is transparent.
 - **Continuous winter snow** — off by default (auto-on above ~45°N).
 - **Arid climate** — off by default.
 - **Airport site** — on by default (ASOS stations are at airports).

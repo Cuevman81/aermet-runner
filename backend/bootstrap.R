@@ -11,6 +11,7 @@ APP_ROOT <- normalizePath(APP_ROOT)
 
 source(file.path(APP_ROOT, "backend", "stations.R"))
 source(file.path(APP_ROOT, "backend", "sectors.R"))
+source(file.path(APP_ROOT, "backend", "moisture.R"))
 source(file.path(APP_ROOT, "backend", "aersurface_runner.R"))
 
 # Bundled AERMET/AERMINUTE engine (AERMET.R) -- source without auto-running.
