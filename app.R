@@ -81,23 +81,22 @@ server <- function(input, output, session) {
     logbuf(c(logbuf(), sprintf("[%s] %s", format(Sys.time(), "%H:%M:%S"), paste0(...))))
   }
 
-  # ---- load station lists once -------------------------------------------
-  observe({
+  # ---- load station lists ONCE at startup (fixed cache; no reactive deps) --
+  observeEvent(TRUE, once = TRUE, {
+    cache <- file.path(APP_ROOT, "cache")
     withProgress(message = "Loading NCEI station lists ...", value = 0.5, {
-      s <- tryCatch(load_surface_stations(file.path(input$outdir %||% DEFAULT_OUTPUT, "cache")),
-                    error = function(e) NULL)
-      g <- tryCatch(load_igra_stations(file.path(input$outdir %||% DEFAULT_OUTPUT, "cache")),
-                    error = function(e) NULL)
-      surf(s); igra(g)
+      s <- tryCatch(load_surface_stations(cache), error = function(e) conditionMessage(e))
+      g <- tryCatch(load_igra_stations(cache),    error = function(e) NULL)
     })
-    if (!is.null(surf())) {
-      states <- sort(unique(surf()$STATE))
+    if (is.data.frame(s)) {
+      surf(s); igra(g)
+      states <- sort(unique(s$STATE))
       updateSelectInput(session, "state", choices = states,
                         selected = if ("MS" %in% states) "MS" else states[1])
-      addlog("Loaded ", nrow(surf()), " US ASOS stations and ",
-             if (is.null(igra())) 0 else nrow(igra()), " IGRA upper-air sites.")
+      addlog("Loaded ", nrow(s), " US ASOS stations and ",
+             if (is.data.frame(g)) nrow(g) else 0, " IGRA upper-air sites.")
     } else {
-      addlog("ERROR: could not load the station list (check network).")
+      addlog("ERROR loading station list: ", if (is.character(s)) s else "check network")
     }
   })
 
