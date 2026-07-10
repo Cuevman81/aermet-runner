@@ -147,7 +147,7 @@ run_aersurface <- function(icao, name, lat, lon, aers_dir, app_root,
   can <- .wcs_clip("canopy",     xmin, xmax, ymin, ymax, file.path(aers_dir, "_can.tif"))
 
   progress("Normalizing NLCD rasters ...", 0.26)
-  wkt_file <- file.path(app_root, "R", "nlcd_albers.wkt")
+  wkt_file <- file.path(app_root, "backend", "nlcd_albers.wkt")
   if (!file.exists(wkt_file)) stop("Missing projection file R/nlcd_albers.wkt")
   crs_wkt <- paste(readLines(wkt_file, warn = FALSE), collapse = "\n")
   .normalize(lc,  file.path(aers_dir, "input", "landcover.tif"),  fill_zero = FALSE, crs_wkt)

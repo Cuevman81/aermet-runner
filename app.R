@@ -12,8 +12,12 @@
 library(shiny)
 library(leaflet)
 
+# Shiny evaluates app.R in its own environment, but source(local=FALSE) and the
+# bundled engine run in globalenv(); put APP_ROOT and the backend there so they
+# resolve consistently. (getwd() is the app directory under runApp()/Run App.)
 APP_ROOT <- normalizePath(getwd())
-source(file.path(APP_ROOT, "R", "bootstrap.R"))
+assign("APP_ROOT", APP_ROOT, envir = globalenv())
+source(file.path(APP_ROOT, "backend", "bootstrap.R"))
 
 DEFAULT_OUTPUT <- file.path(APP_ROOT, "runs")
 CUR_YEAR <- as.integer(format(Sys.Date(), "%Y"))

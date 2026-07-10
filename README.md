@@ -59,7 +59,7 @@ dropdown) → year range → options → **Build met data**.
 You can also run it headless:
 ```r
 APP_ROOT <- normalizePath(".")
-source(file.path(APP_ROOT, "R", "bootstrap.R"))
+source(file.path(APP_ROOT, "backend", "bootstrap.R"))
 res <- run_full_pipeline("KJAN", 2020, 2024, output_root = "runs")
 ```
 
