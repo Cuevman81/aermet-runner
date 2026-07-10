@@ -28,6 +28,8 @@ ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE
 ENGINE_ASOF    <- "July 9, 2026"   # date the bundled EPA versions were confirmed current
 NLCD_YEAR      <- 2021             # NLCD product used by AERSURFACE
 CONTACT_NAME   <- "Rodney Cuevas"
+CONTACT_TITLE  <- "Branch Manager, Air Quality Management Branch"
+CONTACT_ORG    <- "Mississippi Department of Environmental Quality — Air Division"
 CONTACT_EMAIL  <- "RCuevas@mdeq.ms.gov"
 PLATFORM_LABEL <- switch(os_tag(), windows = "Windows (EPA .exe)",
                          macos = "macOS build", linux = "Linux build")
@@ -120,7 +122,9 @@ ui <- fluidPage(
           "for suitability before regulatory use."))),
       column(4,
         tags$p(tags$b("Questions, comments or bugs?")),
-        tags$p(CONTACT_NAME, tags$br(),
+        tags$p(tags$b(CONTACT_NAME), tags$br(),
+          CONTACT_TITLE, tags$br(),
+          CONTACT_ORG, tags$br(),
           tags$a(href = paste0("mailto:", CONTACT_EMAIL,
                  "?subject=AERMET%20Runner%20app"), CONTACT_EMAIL)))
     )
