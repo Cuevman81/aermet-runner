@@ -34,6 +34,31 @@ the station resolution and the on-demand AERSURFACE step are added on top.
 
 ---
 
+## Versions
+
+The bundled processing engine is the **current EPA release as of July 9, 2026**:
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| AERMET | **26135** | latest EPA build |
+| AERMINUTE | **26135** | latest EPA build |
+| AERSURFACE | **26135** | latest EPA build |
+| NLCD (land cover) | **2021** | CONUS release used by AERSURFACE |
+| R | **4.1+** | required |
+
+EPA stamps the AERMOD suite with a Julian build number `YYDDD`, so **26135** is the
+2026 build, day 135 (mid-May 2026) — the newest AERMET / AERMINUTE / AERSURFACE on
+EPA SCRAM at the time of writing. The app also shows these versions live at the top
+of its window and in the run footer, and AERMET's version is re-checked from the
+output header during the QA pass.
+
+When EPA posts a newer build, update it in place: replace the executables in `bin/`
+(keeping the same file names) and bump `ENGINE_VERSION` in `app.R`. Authoritative
+downloads: EPA SCRAM —
+<https://www.epa.gov/scram/air-quality-dispersion-modeling-preferred-and-recommended-models>.
+
+---
+
 ## Requirements
 
 - **R** (4.1+). Install packages once:
