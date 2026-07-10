@@ -1,0 +1,209 @@
+# =============================================================================
+# qa.R -- post-run quality assurance for a completed AERMOD met build.
+#
+# After the pipeline finishes, this inspects the on-disk artifacts and produces a
+# structured pass / warn / fail checklist so the end user can SEE that AERSURFACE
+# and AERMET ran correctly and the processed data is sound. It reuses the engine's
+# own verification helpers (verify_data_completeness, verify_software_versions,
+# verify_file_dates, parse_rp2_file, aermet_run_succeeded) and adds AERSURFACE and
+# provenance checks on top.
+#
+# qa_run(...) returns list(overall, checks, text):
+#   overall : "PASS" | "WARN" | "FAIL"
+#   checks  : list of list(group, label, status, detail)   status in pass/warn/fail/info
+#   text    : character vector -> written as QA_SUMMARY.txt (and added to the zip)
+# =============================================================================
+
+`%||%` <- if (exists("%||%")) `%||%` else function(a, b) if (is.null(a)) b else a
+
+.qa_status_rank <- c(pass = 0, info = 0, warn = 1, fail = 2)
+
+# One checklist row.
+.qa_chk <- function(group, label, status, detail = "")
+  list(group = group, label = label, status = status, detail = detail)
+
+# Robustly read the AERMET .RP2 MESSAGE SUMMARY error/warning counts. (The engine's
+# parse_rp2_file anchors on a trailing digit and returns NA for the "<n> MESSAGES"
+# layout, so QA must not rely on it for the pass/fail error check.)
+.qa_rp2_counts <- function(rp2) {
+  if (!file.exists(rp2)) return(c(error = NA_real_, warning = NA_real_))
+  ln <- readLines(rp2, warn = FALSE)
+  grab <- function(pat) {
+    h <- grep(pat, ln, value = TRUE)
+    if (!length(h)) return(NA_real_)
+    m <- regmatches(h[1], regexec(paste0(pat, "\\s+(\\d+)"), h[1]))[[1]]
+    if (length(m) >= 2) as.numeric(m[2]) else NA_real_
+  }
+  c(error = grab("ERROR MESSAGES"), warning = grab("WARNING MESSAGES"))
+}
+
+# --- AERSURFACE ---------------------------------------------------------------
+# Reads the aers_sfc.txt table + stdout to confirm a clean, complete, physically
+# plausible surface-characteristics file.
+qa_aersurface <- function(aers_dir, icao) {
+  chk <- list(); grp <- "AERSURFACE (land cover)"
+  sfc  <- file.path(aers_dir, sprintf("%s_aers_sfc.txt", tolower(icao)))
+  sout <- file.path(aers_dir, "aersurface_stdout.txt")
+
+  if (!file.exists(sfc) || file.info(sfc)$size == 0)
+    return(list(.qa_chk(grp, "Surface-characteristics file produced", "fail",
+                        "aers_sfc.txt missing or empty")))
+
+  ln <- readLines(sfc, warn = FALSE)
+  out <- if (file.exists(sout)) readLines(sout, warn = FALSE) else character(0)
+
+  # 1) clean completion
+  ok_done <- any(grepl("Finished Successfully", out, ignore.case = TRUE))
+  hung    <- any(grepl("Standard Parallel|Enter the", out, ignore.case = TRUE))
+  chk <- c(chk, list(.qa_chk(grp, "AERSURFACE finished successfully",
+    if (ok_done && !hung) "pass" else "fail",
+    if (hung) "interactive-prompt hang detected"
+    else if (ok_done) "clean exit" else "no success banner in stdout")))
+
+  # 2) version
+  ver <- sub(".*Version\\s+([0-9]+).*", "\\1", grep("Version", ln, value = TRUE)[1])
+  chk <- c(chk, list(.qa_chk(grp, "AERSURFACE version 26135",
+    if (identical(ver, "26135")) "pass" else "warn",
+    sprintf("reported %s", ver %||% "unknown"))))
+
+  # 3) surface-characteristics table complete & physically plausible
+  sc <- grep("^\\s*SITE_CHAR", ln, value = TRUE)
+  nsect <- length(grep("^\\s*SECTOR\\s", ln))
+  vals <- do.call(rbind, lapply(sc, function(l) {
+    f <- suppressWarnings(as.numeric(strsplit(trimws(l), "\\s+")[[1]][-1]))
+    if (length(f) >= 5) f[3:5] else rep(NA_real_, 3)
+  }))
+  exp_rows <- 12 * max(nsect, 1)
+  plausible <- !is.null(vals) && all(is.finite(vals)) && all(vals >= 0) && all(vals <= 10)
+  complete  <- length(sc) == exp_rows
+  chk <- c(chk, list(.qa_chk(grp, "Surface characteristics complete & in range",
+    if (complete && plausible) "pass" else if (length(sc) > 0 && plausible) "warn" else "fail",
+    sprintf("%d/%d monthly rows across %d sector(s); %s", length(sc), exp_rows,
+            max(nsect, 1),
+            if (!is.null(vals) && all(is.finite(vals)))
+              sprintf("z0 %.3f-%.3f, Bowen %.2f-%.2f, albedo %.3f-%.3f",
+                      min(vals[,1]), max(vals[,1]), min(vals[,2]), max(vals[,2]),
+                      min(vals[,3]), max(vals[,3]))
+            else "non-finite values present"))))
+
+  # 4) sectors used (informational) -- prefer AP/NONAP from the control file
+  inp <- file.path(aers_dir, sprintf("%s_aersurface.inp", tolower(icao)))
+  sect_txt <- if (file.exists(inp)) {
+    s <- grep("^\\s*SECTOR\\s", readLines(inp, warn = FALSE), value = TRUE)
+    paste(sub(".*SECTOR\\s+\\d+\\s+([0-9.]+)\\s+([0-9.]+)\\s+(\\S+).*", "\\1-\\2 \\3", s), collapse = ", ")
+  } else sprintf("%d sector(s)", max(nsect, 1))
+  chk <- c(chk, list(.qa_chk(grp, "Airport (AP) / non-airport (NONAP) sectors", "info", sect_txt)))
+  chk
+}
+
+# --- AERMET -------------------------------------------------------------------
+qa_aermet <- function(station_dir, icao, y1, y2) {
+  chk <- list(); grp <- "AERMET (processing)"
+  years <- y1:y2
+
+  # 1) engine version from the .sfc header
+  ver <- verify_software_versions(station_dir, y1, y2)$aermet
+  chk <- c(chk, list(.qa_chk(grp, "AERMET version 26135",
+    if (identical(ver, "26135")) "pass" else "warn", sprintf("reported %s", ver %||% "unknown"))))
+
+  # 2) every Stage-2 report finished successfully (regular + ADJ_U*)
+  rp2 <- unlist(lapply(years, function(y)
+    file.path(station_dir, sprintf("%s%d%s.RP2", icao, y, c("", "US")))))
+  okv <- vapply(rp2, aermet_run_succeeded, logical(1))
+  chk <- c(chk, list(.qa_chk(grp, "AERMET Stage 2 finished successfully",
+    if (all(okv)) "pass" else "fail",
+    sprintf("%d/%d runs OK%s", sum(okv), length(okv),
+            if (all(okv)) "" else paste0(" — failed: ",
+              paste(basename(rp2[!okv]), collapse = ", "))))))
+
+  # 3) no AERMET error messages; surface warning totals as info
+  cnts   <- vapply(rp2, .qa_rp2_counts, numeric(2))     # 2 x n: rows "error","warning"
+  errs   <- sum(cnts["error", ],   na.rm = TRUE)
+  warns  <- sum(cnts["warning", ], na.rm = TRUE)
+  parsed <- any(!is.na(cnts["error", ]))
+  chk <- c(chk, list(.qa_chk(grp, "No AERMET error messages",
+    if (!parsed) "warn" else if (errs == 0) "pass" else "fail",
+    if (!parsed) "could not read RP2 message summary"
+    else sprintf("%g error(s) across all runs", errs))))
+  chk <- c(chk, list(.qa_chk(grp, "AERMET warnings (informational)", "info",
+    sprintf("%g warning(s) — routine (e.g. calm/variable winds, substitutions)", warns))))
+
+  # 4) output files exist, non-empty, correct start year
+  bad <- character(0); nfiles <- 0
+  for (y in years) for (sfx in c("", "US")) for (ext in c("sfc", "pfl")) {
+    fp <- file.path(station_dir, sprintf("%s%d%s.%s", icao, y, sfx, ext))
+    nfiles <- nfiles + 1
+    v <- verify_file_dates(fp, y)
+    if (!isTRUE(v$exists) || !isTRUE(v$valid_dates) || !file.exists(fp) || file.size(fp) == 0)
+      bad <- c(bad, basename(fp))
+  }
+  chk <- c(chk, list(.qa_chk(grp, "AERMOD .sfc/.pfl files valid (year-checked)",
+    if (length(bad) == 0) "pass" else "fail",
+    if (length(bad) == 0) sprintf("all %d files present, non-empty, correct year", nfiles)
+    else paste("problem files:", paste(bad, collapse = ", ")))))
+
+  # 5) data actually flowed through (obs counts, informational)
+  obs <- lapply(years, function(y)
+    parse_rp2_file(file.path(station_dir, sprintf("%s%d.RP2", icao, y))))
+  obs_txt <- paste(mapply(function(y, s) sprintf("%d: UA %s / sfc %s", y,
+    fmt_int(s$ua_obs %||% NA), fmt_int(s$surface_obs %||% NA)), years, obs), collapse = " | ")
+  any_zero <- any(vapply(obs, function(s) isTRUE((s$surface_obs %||% 0) == 0) ||
+                                          isTRUE((s$ua_obs %||% 0) == 0), logical(1)))
+  chk <- c(chk, list(.qa_chk(grp, "Upper-air & surface observations ingested",
+    if (any_zero) "warn" else "info", obs_txt)))
+  chk
+}
+
+# --- Completeness (EPA 90% per quarter) ---------------------------------------
+qa_completeness <- function(station_dir, icao, y1, y2) {
+  grp <- "Data completeness (EPA target 90%/quarter)"
+  dc <- verify_data_completeness(station_dir, icao, y1, y2)
+  chk <- list(); low <- character(0)
+  for (y in as.character(y1:y2)) {
+    yd <- dc[[y]]
+    if (is.null(yd) || !is.null(yd$error)) {
+      chk <- c(chk, list(.qa_chk(grp, sprintf("%s completeness", y), "fail",
+                                 yd$error %||% "no data")))
+      next
+    }
+    ann <- yd$annual$completeness_pct %||% NA
+    qtxt <- paste(vapply(names(yd$quarters), function(q) {
+      qd <- yd$quarters[[q]]
+      if (isFALSE(qd$meets_epa)) low <<- c(low, sprintf("%s %s", y, q))
+      sprintf("%s %.0f%%", q, qd$completeness_pct %||% 0)
+    }, character(1)), collapse = "  ")
+    allq <- all(vapply(yd$quarters, function(qd) isTRUE(qd$meets_epa), logical(1)))
+    chk <- c(chk, list(.qa_chk(grp, sprintf("%s — %.1f%% annual", y, ann),
+      if (allq) "pass" else "warn", qtxt)))
+  }
+  attr(chk, "low") <- low
+  chk
+}
+
+# --- Top level ----------------------------------------------------------------
+qa_run <- function(station_dir, aers_dir, icao, y1, y2) {
+  icao <- toupper(icao)
+  checks <- c(qa_aersurface(aers_dir, icao),
+              qa_aermet(station_dir, icao, y1, y2),
+              qa_completeness(station_dir, icao, y1, y2))
+  worst <- max(vapply(checks, function(c) .qa_status_rank[[c$status]], numeric(1)))
+  overall <- c("PASS", "WARN", "FAIL")[worst + 1]
+
+  # Human-readable summary (also written to QA_SUMMARY.txt / added to the zip)
+  sym <- c(pass = "[PASS]", warn = "[WARN]", fail = "[FAIL]", info = "[info]")
+  txt <- c(sprintf("QA SUMMARY -- %s  %d-%d", icao, y1, y2),
+           sprintf("Overall: %s", overall),
+           sprintf("Generated: %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+           strrep("-", 66))
+  grp <- ""
+  for (c in checks) {
+    if (!identical(c$group, grp)) { grp <- c$group; txt <- c(txt, "", grp) }
+    txt <- c(txt, sprintf("  %s %s%s", sym[[c$status]], c$label,
+                          if (nzchar(c$detail)) sprintf("  --  %s", c$detail) else ""))
+  }
+  txt <- c(txt, "", strrep("-", 66),
+           "PASS = check met.  WARN = review (usually data availability, not a",
+           "processing error).  FAIL = do not use until resolved.",
+           "EPA completeness target is 90% of hours per calendar quarter.")
+  list(overall = overall, checks = checks, text = txt)
+}

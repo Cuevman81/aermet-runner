@@ -18,5 +18,8 @@ source(file.path(APP_ROOT, "backend", "aersurface_runner.R"))
 AERMET_SOURCE_ONLY <- TRUE
 source(file.path(APP_ROOT, "backend", "engine.R"))
 
+# Post-run QA (reuses the engine's verify_* helpers) -- must come AFTER engine.R.
+source(file.path(APP_ROOT, "backend", "qa.R"))
+
 # Overrides + run_full_pipeline() -- must come AFTER engine.R.
 source(file.path(APP_ROOT, "backend", "pipeline.R"))

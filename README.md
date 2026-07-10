@@ -115,6 +115,27 @@ Re-running a station is cheap — the app only redoes what actually changed:
 So a typical "same site, try Dry instead" re-run does no network downloads at
 all: it just re-runs AERSURFACE on the cached land cover and rebuilds AERMET.
 
+### Quality assurance (QA)
+
+Every run ends with an automatic QA pass so you can see the processed data is
+sound before you use it. The app shows a **PASS / WARN / FAIL** badge per station
+and an expandable checklist (auto-expanded when it isn't a clean PASS):
+
+- **AERSURFACE** — finished cleanly (no interactive-prompt hang), version 26135,
+  and a complete, physically plausible surface-characteristics table (12 monthly
+  rows per sector; roughness / Bowen / albedo in range), plus the AP/NONAP sectors.
+- **AERMET** — engine version 26135, every Stage-2 run finished successfully
+  (regular + ADJ_U*), **zero error messages** in the `.RP2` summaries, all
+  `.sfc`/`.pfl` output files present, non-empty and stamped with the right year,
+  and confirmation that upper-air and surface observations were actually ingested.
+- **Data completeness** — each year's annual and per-quarter percentages against
+  the EPA 90%-per-quarter target (a quarter below 90% is a **WARN**, i.e. a data-
+  availability note, not a processing error).
+
+The same checklist is written to `<ICAO>_QA_SUMMARY.txt` and folded into the
+delivered zip. Meaning of the states: **PASS** = check met; **WARN** = review
+(usually data availability); **FAIL** = do not use until resolved.
+
 ## AERSURFACE options
 
 The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:

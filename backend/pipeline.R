@@ -137,8 +137,23 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
     root_directory = run_dir,
     ua_station_id  = st$ua_station_id)
 
+  # --- Post-run QA: prove AERSURFACE + AERMET ran correctly and the data is sound
+  progress("Running QA checks ...", 0.95)
+  aers_dir <- file.path(paths$station_dir, "aersurface")
+  qa <- tryCatch(qa_run(paths$station_dir, aers_dir, icao, y1, y2),
+                 error = function(e) list(overall = "WARN",
+                   checks = list(list(group = "QA", label = "QA checks",
+                     status = "warn", detail = conditionMessage(e))),
+                   text = c("QA could not complete:", conditionMessage(e))))
+  qa_file <- file.path(paths$station_dir, sprintf("%s_QA_SUMMARY.txt", icao))
+  writeLines(qa$text, qa_file)
+  progress(sprintf("QA overall: %s", qa$overall), 0.96)
+
   progress("Packaging output ...", 0.97)
   zip_path <- tryCatch(zip_met_files(paths, y1, y2), error = function(e) NA_character_)
+  # fold the QA summary into the delivered zip
+  if (!is.na(zip_path) && file.exists(qa_file))
+    tryCatch(utils::zip(zip_path, qa_file, flags = "-jgq"), error = function(e) NULL)
 
   # Report any 1-minute ASOS months that were unavailable at NCEI (e.g. isolated
   # archive gaps). Only months up to the current month are expected.
@@ -155,11 +170,12 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
     progress(sprintf("NOTE: 1-min ASOS not available at NCEI for: %s",
                      paste(missing, collapse = ", ")), 0.99)
 
-  progress("Done.", 1.0)
+  progress(sprintf("Done. QA: %s", qa$overall), 1.0)
   list(station = st, output_dir = normalizePath(run_dir),
        station_dir = paths$station_dir,
        zip_path = if (is.na(zip_path)) NA else normalizePath(zip_path),
        missing_asos_months = missing,
        moisture = opts$moisture, moisture_info = moisture_info,
+       qa = qa,
        icao = icao, years = c(y1, y2))
 }

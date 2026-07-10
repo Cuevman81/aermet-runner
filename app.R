@@ -44,6 +44,19 @@ ui <- fluidPage(
     .footer { border-top:1px solid #ddd; margin-top:14px; padding-top:10px;
               font-size:12px; color:#555; }
     .footer a { color:#005ea2; }
+    .qa-station { border:1px solid #e6ebf0; border-radius:8px; padding:8px 12px; margin:8px 0; }
+    .qa-badge { display:inline-block; font-weight:700; font-size:11px; padding:2px 9px;
+                border-radius:10px; color:#fff; margin-left:8px; vertical-align:middle; }
+    .qa-PASS { background:#2e8540; } .qa-WARN { background:#c98a00; } .qa-FAIL { background:#c22e2e; }
+    .qa-panel { margin-top:6px; }
+    .qa-panel > summary { cursor:pointer; font-size:13px; color:#134a76; outline:none; }
+    .qa-group { font-weight:600; margin:8px 0 2px; font-size:12.5px; color:#134a76; }
+    .qa-list { list-style:none; padding-left:2px; margin:0 0 4px; }
+    .qa-list li { font-size:12.5px; padding:1px 0; }
+    .qa-ico { font-weight:700; margin-right:6px; }
+    .qa-pass .qa-ico { color:#2e8540; } .qa-warn .qa-ico { color:#c98a00; }
+    .qa-fail .qa-ico { color:#c22e2e; } .qa-info .qa-ico { color:#5a80a0; }
+    .qa-detail { color:#777; }
   "))),
   titlePanel("AERMET Runner — AERMOD-ready met data for any US station"),
   p(class = "muted", "Runs AERSURFACE (on-demand NLCD) + AERMET/AERMINUTE ",
@@ -236,22 +249,26 @@ server <- function(input, output, session) {
     rs <- results(); if (is.null(rs) || length(rs) == 0) return(NULL)
     single <- length(rs) == 1
     rows <- lapply(rs, function(res) {
-      miss <- res$missing_asos_months
-      tags$li(
-        tags$b(sprintf("%s %d-%d", res$icao, res$years[1], res$years[2])),
-        sprintf(" — moisture %s", res$moisture %||% "?"),
-        if (length(miss)) tags$span(class = "muted",
-          sprintf("  (1-min ASOS gap: %s)", paste(miss, collapse = ", "))) else NULL,
-        tags$br(), tags$code(res$output_dir))
+      miss <- res$missing_asos_months; qa <- res$qa
+      div(class = "qa-station",
+        tags$p(
+          tags$b(sprintf("%s %d-%d", res$icao, res$years[1], res$years[2])),
+          sprintf(" — moisture %s", res$moisture %||% "?"),
+          if (!is.null(qa)) tags$span(class = paste0("qa-badge qa-", qa$overall), qa$overall) else NULL,
+          if (length(miss)) tags$span(class = "muted",
+            sprintf("  (1-min ASOS gap: %s)", paste(miss, collapse = ", "))) else NULL),
+        tags$code(res$output_dir),
+        qa_panel(qa))
     })
     tagList(
       tags$h4(sprintf("Build complete — %d station(s)", length(rs))),
-      tags$p(class = "muted", sprintf("EPA AERMET/AERMINUTE/AERSURFACE %s · NLCD %d",
-                                      ENGINE_VERSION, NLCD_YEAR)),
-      tags$ul(rows),
+      tags$p(class = "muted", sprintf("EPA AERMET/AERMINUTE/AERSURFACE %s · NLCD %d · ",
+                                      ENGINE_VERSION, NLCD_YEAR),
+             "QA summary is saved as <ICAO>_QA_SUMMARY.txt and included in the zip."),
+      rows,
       if (single && !is.na(rs[[1]]$zip_path)) downloadButton("dl", "Download zip")
       else tags$p(class = "muted",
-        "Each station folder above holds its AERMOD-ready met files and a zip.")
+        "Each station folder above holds its AERMOD-ready met files, QA summary and a zip.")
     )
   })
   output$dl <- downloadHandler(
@@ -261,5 +278,31 @@ server <- function(input, output, session) {
 }
 
 `%||%` <- function(a, b) if (is.null(a) || !nzchar(a)) b else a
+
+# --- QA panel rendering -------------------------------------------------------
+qa_icon <- function(s) switch(s, pass = "✓", warn = "▲",
+                              fail = "✗", info = "•", "•")
+
+# Collapsible per-station QA checklist; auto-expanded when not a clean PASS.
+qa_panel <- function(qa) {
+  if (is.null(qa)) return(NULL)
+  groups <- unique(vapply(qa$checks, function(c) c$group, ""))
+  body <- lapply(groups, function(g) {
+    items <- Filter(function(c) identical(c$group, g), qa$checks)
+    tagList(div(class = "qa-group", g),
+      tags$ul(class = "qa-list", lapply(items, function(c)
+        tags$li(class = paste0("qa-", c$status),
+          tags$span(class = "qa-ico", qa_icon(c$status)),
+          tags$span(c$label),
+          if (nzchar(c$detail)) tags$span(class = "qa-detail",
+                                          paste0(" — ", c$detail)) else NULL))))
+  })
+  det <- tags$details(class = "qa-panel",
+    tags$summary(sprintf("Quality assurance — overall %s (click to %s)",
+                         qa$overall, if (qa$overall == "PASS") "expand" else "review")),
+    body)
+  if (qa$overall != "PASS") det <- tagAppendAttributes(det, open = NA)
+  det
+}
 
 shinyApp(ui, server)
