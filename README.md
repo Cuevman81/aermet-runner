@@ -66,14 +66,49 @@ the three EPA executables. The app auto-selects the right build:
   app looks for exactly those names and prints a reminder if they're missing.
   (Linux also needs system GDAL/PROJ for the `terra` package — see `install_deps.R`.)
 
-## Run it
+## Install
+
+You need **git** and **R 4.1+** (RStudio optional but recommended).
+
+**1. Clone the repository** (in a terminal / macOS Terminal / Windows Git Bash or
+PowerShell):
+
+```bash
+git clone https://github.com/Cuevman81/aermet-runner.git
+cd aermet-runner
+```
+
+No git? On the GitHub page use **Code ▸ Download ZIP**, unzip it, and open the
+folder — everything below is the same.
+
+**2. Install the R packages** (one time). From a terminal in the repo folder:
+
+```bash
+Rscript install_deps.R      # shiny, leaflet, httr, readr, dplyr, stringr, terra
+```
+
+or from an R / RStudio console with that folder as the working directory:
 
 ```r
-# from the repo folder
+source("install_deps.R")
+```
+
+The bundled EPA binaries in `bin/` are already included by the clone — nothing else
+to download (macOS/Windows). See **Platform support** for the one macOS Gatekeeper
+step and the Linux note.
+
+## Run it
+
+Open the project in RStudio (open `app.R`, or **File ▸ Open Project** if you make
+one) and click **Run App** — or, from an R console with the repo folder as the
+working directory:
+
+```r
 shiny::runApp()
 ```
-or open `app.R` in RStudio and click **Run App**. Pick a state → station (map or
-dropdown) → year range → options → **Build met data**.
+
+Then pick a state → station (map or dropdown) → year range → options →
+**Build met data**.
 
 **Multiple stations:** pick one station, then list additional ICAOs in the
 **"Also process"** box (comma-separated, e.g. `KGPT, KMEI, KTUP`). The app runs
@@ -197,3 +232,26 @@ surface characteristics match the regional-tile workflow byte-for-byte.
   regions that can be a few hundred km; confirm it suits your application.
 - NLCD is the 2021 CONUS release. AK/HI/PR use different NLCD/datum handling and
   are not yet wired in.
+
+## License & attribution
+
+The code in this repository is released under the **MIT License** (see `LICENSE`).
+
+It redistributes, for convenience, third-party components that keep their own terms:
+
+- **EPA AERMET, AERMINUTE and AERSURFACE (v26135)** in `bin/` — U.S. EPA regulatory
+  models in the **public domain**, bundled unmodified (the Windows builds are the
+  official EPA executables; the macOS builds are compiled from EPA source). EPA does
+  not endorse or support this tool. Authoritative versions come from EPA SCRAM:
+  <https://www.epa.gov/scram/air-quality-dispersion-modeling-preferred-and-recommended-models>
+- **OurAirports runway data** (`data/ourairports_runways.csv`) — released into the
+  **public domain** by OurAirports (<https://ourairports.com/data/>).
+
+Input data is fetched at run time from public U.S. Government sources (public-domain
+works): **NOAA / NCEI** — ISD-history, GHCNh hourly, 1-/5-minute ASOS, IGRA2 upper
+air, and GHCN-Daily precipitation; **MRLC** — NLCD land cover, impervious and
+tree-canopy. Please credit NOAA/NCEI and the MRLC (USGS/USFS) NLCD program in any
+analyses that use the output.
+
+Processed output is only as good as its inputs and the automated defaults — review
+the QA summary and the **Notes & limits** above before regulatory use.
