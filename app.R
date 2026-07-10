@@ -22,6 +22,15 @@ source(file.path(APP_ROOT, "backend", "bootstrap.R"))
 DEFAULT_OUTPUT <- file.path(APP_ROOT, "runs")
 CUR_YEAR <- as.integer(format(Sys.Date(), "%Y"))
 
+# --- App / engine metadata (update these when the bundled EPA binaries change) --
+APP_VERSION    <- "1.0"
+ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE
+NLCD_YEAR      <- 2021             # NLCD product used by AERSURFACE
+CONTACT_NAME   <- "Rodney Cuevas"
+CONTACT_EMAIL  <- "RCuevas@mdeq.ms.gov"
+PLATFORM_LABEL <- switch(os_tag(), windows = "Windows (EPA .exe)",
+                         macos = "macOS build", linux = "Linux build")
+
 ui <- fluidPage(
   tags$head(tags$style(HTML("
     .btn-run { background:#005ea2; border-color:#005ea2; color:#fff; font-weight:600; }
@@ -29,10 +38,20 @@ ui <- fluidPage(
            background:#0b1f33; color:#d6e6f5; padding:10px; border-radius:6px;
            height:360px; overflow-y:auto; }
     .muted { color:#666; font-size:12px; }
+    .verbadge { display:inline-block; background:#eef4fa; border:1px solid #cfe0f0;
+                color:#134a76; font-size:12px; font-weight:600; padding:4px 10px;
+                border-radius:4px; margin:4px 0 8px; }
+    .footer { border-top:1px solid #ddd; margin-top:14px; padding-top:10px;
+              font-size:12px; color:#555; }
+    .footer a { color:#005ea2; }
   "))),
   titlePanel("AERMET Runner — AERMOD-ready met data for any US station"),
   p(class = "muted", "Runs AERSURFACE (on-demand NLCD) + AERMET/AERMINUTE ",
     "(GHCNh surface, 1-min ASOS winds, IGRA upper air) for a 1-5 year window."),
+  div(class = "verbadge",
+      sprintf("Processing with EPA AERMET %s · AERMINUTE %s · AERSURFACE %s",
+              ENGINE_VERSION, ENGINE_VERSION, ENGINE_VERSION),
+      sprintf("  |  NLCD %d  |  running: %s  |  app v%s", NLCD_YEAR, PLATFORM_LABEL, APP_VERSION)),
   sidebarLayout(
     sidebarPanel(
       width = 4,
@@ -67,10 +86,24 @@ ui <- fluidPage(
       uiOutput("result_ui")
     )
   ),
-  tags$hr(),
-  p(class = "muted",
-    "Surface: GHCNh (NCEI). Winds: 1-min ASOS via AERMINUTE. Upper air: IGRA2. ",
-    "Land cover: NLCD via MRLC. Engine: EPA AERMET/AERMINUTE/AERSURFACE 26135 (bundled).")
+  div(class = "footer",
+    fluidRow(
+      column(8,
+        tags$p(tags$b("Processing engine: "),
+          sprintf("EPA AERMET %s · AERMINUTE %s · AERSURFACE %s (bundled). ",
+                  ENGINE_VERSION, ENGINE_VERSION, ENGINE_VERSION),
+          sprintf("NLCD %d land cover via MRLC. ", NLCD_YEAR),
+          "Surface: GHCNh (NCEI) · Winds: 1-minute ASOS · Upper air: IGRA2."),
+        tags$p(tags$em("Automated defaults (AERSURFACE seasons/moisture, AP/NONAP ",
+          "sectors, nearest upper-air site, data completeness) should be reviewed ",
+          "for suitability before regulatory use."))),
+      column(4,
+        tags$p(tags$b("Questions, comments or bugs?")),
+        tags$p(CONTACT_NAME, tags$br(),
+          tags$a(href = paste0("mailto:", CONTACT_EMAIL,
+                 "?subject=AERMET%20Runner%20app"), CONTACT_EMAIL)))
+    )
+  )
 )
 
 server <- function(input, output, session) {
@@ -187,6 +220,9 @@ server <- function(input, output, session) {
     miss <- res$missing_asos_months
     tagList(
       tags$h4("Build complete"),
+      tags$p(class = "muted", sprintf(
+        "%s %d-%d · built with EPA AERMET/AERMINUTE/AERSURFACE %s, NLCD %d",
+        res$icao, res$years[1], res$years[2], ENGINE_VERSION, NLCD_YEAR)),
       tags$p(tags$b("Output folder: "), tags$code(res$output_dir)),
       if (length(miss)) tags$p(class = "muted",
         tags$b("Note: "), "1-min ASOS was unavailable at NCEI for ",
