@@ -15,6 +15,8 @@
 # =============================================================================
 suppressWarnings(suppressMessages({ library(httr); library(terra) }))
 
+if (!exists("%||%")) `%||%` <- function(a, b) if (is.null(a)) b else a
+
 MRLC_WCS <- "https://www.mrlc.gov/geoserver/mrlc_download/wcs"
 
 # NLCD coverage ids by product (2021 release -- the current CONUS NLCD)
@@ -142,34 +144,106 @@ bin_candidates <- function(app_root, tool) {
        "bin/aersurface_26135_linux."), app_root, os_tag()))
 }
 
+# Compact signature of every input that changes the surface characteristics.
+# If it matches a previous run's, AERSURFACE can be skipped entirely (the .sfc is
+# reused as-is). Note: moisture must already be resolved to DRY/AVERAGE/WET here
+# (the pipeline resolves AUTO before this), so an AUTO->WET run and an explicit
+# WET run share a signature and reuse, while WET->DRY differs and re-runs.
+.aers_signature <- function(lat, lon, opts, sectors) {
+  sec <- paste(sprintf("%.1f-%.1f:%s", sectors$start, sectors$end, sectors$type), collapse = ",")
+  sprintf("v1|ll=%.5f,%.5f|moist=%s|snow=%s|arid=%s|zorad=%.2f|nlcd=%s|sect=%s",
+          lat, lon, toupper(opts$moisture %||% "AVERAGE"),
+          isTRUE(opts$snow), isTRUE(opts$arid), as.numeric(opts$zoradius %||% 1.0),
+          as.character(opts$nlcd_year %||% 2021), sec)
+}
+
+# True when all given rasters exist and look non-empty.
+.have_tifs <- function(paths) all(file.exists(paths)) && all(file.info(paths)$size > 1000)
+
 # Main entry: run AERSURFACE for a site, return the full path to the .sfc file.
+# Reuses work across runs so a re-run with a different moisture (or an identical
+# re-run) never re-fetches NLCD:
+#   * settings unchanged  -> skip AERSURFACE entirely, reuse the existing .sfc
+#   * settings changed     -> re-run, but reuse the NLCD clips (run folder, then
+#                             a site-level cache) rather than re-downloading them
 # progress(msg, frac) is an optional callback for the Shiny progress bar.
 run_aersurface <- function(icao, name, lat, lon, aers_dir, app_root,
-                           opts = NULL, progress = function(m, f) {}) {
+                           opts = NULL, nlcd_cache_dir = NULL,
+                           progress = function(m, f) {}) {
   if (is.null(opts)) opts <- default_aersurface_opts(lat)
-  dir.create(file.path(aers_dir, "input"), recursive = TRUE, showWarnings = FALSE)
+  input_dir <- file.path(aers_dir, "input")
+  dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # 30 km AOI (site +/- 15 km), snapped to the 30 m NLCD grid
-  xy <- .to_albers(lat, lon); half <- 15000
-  snap <- function(v) round(v / 30) * 30
-  xmin <- snap(xy[1] - half); xmax <- snap(xy[1] + half)
-  ymin <- snap(xy[2] - half); ymax <- snap(xy[2] + half)
+  sfc_name <- sprintf("%s_aers_sfc.txt", tolower(icao))
+  sfc      <- file.path(aers_dir, sfc_name)
+  sig_file <- file.path(aers_dir, ".aers_signature")
 
-  progress("Fetching NLCD land cover ...", 0.10)
-  lc  <- .wcs_clip("landcover",  xmin, xmax, ymin, ymax, file.path(aers_dir, "_lc.tif"))
-  progress("Fetching NLCD impervious ...", 0.16)
-  imp <- .wcs_clip("impervious", xmin, xmax, ymin, ymax, file.path(aers_dir, "_imp.tif"))
-  progress("Fetching NLCD tree canopy ...", 0.22)
-  can <- .wcs_clip("canopy",     xmin, xmax, ymin, ymax, file.path(aers_dir, "_can.tif"))
+  # Sectors first -- cheap and needed for the signature (no network).
+  # User override wins; else derive AP/NONAP from runway geometry
+  # (single 0-360 NONAP if the site is marked non-airport).
+  progress("Deriving airport sectors ...", 0.30)
+  runways_csv <- file.path(app_root, "data", "ourairports_runways.csv")
+  sectors <- if (!is.null(opts$sectors) && nrow(opts$sectors) > 0) opts$sectors
+    else if (isTRUE(opts$airport)) derive_sectors(icao, lat, lon, runways_csv, default_type = "AP")
+    else data.frame(start = 0, end = 360, type = "NONAP", stringsAsFactors = FALSE)
 
-  progress("Normalizing NLCD rasters ...", 0.26)
-  wkt_file <- file.path(app_root, "backend", "nlcd_albers.wkt")
-  if (!file.exists(wkt_file)) stop("Missing projection file R/nlcd_albers.wkt")
-  crs_wkt <- paste(readLines(wkt_file, warn = FALSE), collapse = "\n")
-  .normalize(lc,  file.path(aers_dir, "input", "landcover.tif"),  fill_zero = FALSE, crs_wkt)
-  .normalize(imp, file.path(aers_dir, "input", "impervious.tif"), fill_zero = TRUE,  crs_wkt)
-  .normalize(can, file.path(aers_dir, "input", "canopy.tif"),     fill_zero = TRUE,  crs_wkt)
-  unlink(c(lc, imp, can))
+  # Reuse #1: a previous run produced this .sfc with identical settings -> skip
+  # the NLCD fetch and the AERSURFACE run altogether.
+  sig <- .aers_signature(lat, lon, opts, sectors)
+  if (file.exists(sfc) && file.info(sfc)$size > 0 && file.exists(sig_file) &&
+      identical(readLines(sig_file, warn = FALSE)[1], sig)) {
+    progress("Reusing existing AERSURFACE output (settings unchanged) ...", 0.34)
+    cat(sprintf("AERSURFACE reuse for %s: settings unchanged, skipping NLCD + run\n", icao))
+    return(normalizePath(sfc))
+  }
+
+  cat(sprintf("AERSURFACE sectors for %s: %s\n", icao,
+              paste(sprintf("%.0f-%.0f:%s", sectors$start, sectors$end, sectors$type),
+                    collapse = "  ")))
+
+  # NLCD clips: reuse if already normalized in the run folder, else pull from the
+  # site-level cache, else fetch from MRLC + normalize (and populate the cache).
+  dst_lc  <- file.path(input_dir, "landcover.tif")
+  dst_imp <- file.path(input_dir, "impervious.tif")
+  dst_can <- file.path(input_dir, "canopy.tif")
+  input_tifs <- c(dst_lc, dst_imp, dst_can)
+  cache_tifs <- if (!is.null(nlcd_cache_dir))
+    file.path(nlcd_cache_dir, c("landcover.tif", "impervious.tif", "canopy.tif")) else NULL
+
+  if (.have_tifs(input_tifs)) {
+    progress("Reusing NLCD clips already in the run folder ...", 0.26)
+  } else if (!is.null(cache_tifs) && .have_tifs(cache_tifs)) {
+    progress("Reusing cached NLCD for this site ...", 0.26)
+    file.copy(cache_tifs, input_tifs, overwrite = TRUE)
+  } else {
+    # 30 km AOI (site +/- 15 km), snapped to the 30 m NLCD grid
+    xy <- .to_albers(lat, lon); half <- 15000
+    snap <- function(v) round(v / 30) * 30
+    xmin <- snap(xy[1] - half); xmax <- snap(xy[1] + half)
+    ymin <- snap(xy[2] - half); ymax <- snap(xy[2] + half)
+
+    progress("Fetching NLCD land cover ...", 0.10)
+    lc  <- .wcs_clip("landcover",  xmin, xmax, ymin, ymax, file.path(aers_dir, "_lc.tif"))
+    progress("Fetching NLCD impervious ...", 0.16)
+    imp <- .wcs_clip("impervious", xmin, xmax, ymin, ymax, file.path(aers_dir, "_imp.tif"))
+    progress("Fetching NLCD tree canopy ...", 0.22)
+    can <- .wcs_clip("canopy",     xmin, xmax, ymin, ymax, file.path(aers_dir, "_can.tif"))
+
+    progress("Normalizing NLCD rasters ...", 0.26)
+    wkt_file <- file.path(app_root, "backend", "nlcd_albers.wkt")
+    if (!file.exists(wkt_file)) stop("Missing projection file backend/nlcd_albers.wkt")
+    crs_wkt <- paste(readLines(wkt_file, warn = FALSE), collapse = "\n")
+    .normalize(lc,  dst_lc,  fill_zero = FALSE, crs_wkt)
+    .normalize(imp, dst_imp, fill_zero = TRUE,  crs_wkt)
+    .normalize(can, dst_can, fill_zero = TRUE,  crs_wkt)
+    unlink(c(lc, imp, can))
+
+    # Populate the site-level NLCD cache so other windows / moisture re-runs reuse it.
+    if (!is.null(cache_tifs)) {
+      dir.create(nlcd_cache_dir, recursive = TRUE, showWarnings = FALSE)
+      file.copy(input_tifs, cache_tifs, overwrite = TRUE)
+    }
+  }
 
   # binary + datum files into the run dir
   exe_src <- .aersurface_exe(app_root)
@@ -180,18 +254,6 @@ run_aersurface <- function(icao, name, lat, lon, aers_dir, app_root,
   for (d in list.files(file.path(app_root, "bin"), pattern = "\\.(las|los)$", full.names = TRUE))
     file.copy(d, file.path(aers_dir, basename(d)), overwrite = TRUE)
 
-  # Sectors: user override wins; else derive AP/NONAP from runway geometry
-  # (single 0-360 NONAP if the site is marked non-airport).
-  progress("Deriving airport sectors ...", 0.30)
-  runways_csv <- file.path(app_root, "data", "ourairports_runways.csv")
-  sectors <- if (!is.null(opts$sectors) && nrow(opts$sectors) > 0) opts$sectors
-    else if (isTRUE(opts$airport)) derive_sectors(icao, lat, lon, runways_csv, default_type = "AP")
-    else data.frame(start = 0, end = 360, type = "NONAP", stringsAsFactors = FALSE)
-  cat(sprintf("AERSURFACE sectors for %s: %s\n", icao,
-              paste(sprintf("%.0f-%.0f:%s", sectors$start, sectors$end, sectors$type),
-                    collapse = "  ")))
-
-  sfc_name <- sprintf("%s_aers_sfc.txt", tolower(icao))
   inp <- file.path(aers_dir, sprintf("%s_aersurface.inp", tolower(icao)))
   writeLines(.build_control(icao, name, lat, lon, opts, sfc_name, sectors), inp)
 
@@ -203,8 +265,8 @@ run_aersurface <- function(icao, name, lat, lon, aers_dir, app_root,
           stderr = "aersurface_stderr.txt", timeout = 600)
   setwd(old)
 
-  sfc <- file.path(aers_dir, sfc_name)
   if (!file.exists(sfc) || file.info(sfc)$size == 0)
     stop("AERSURFACE did not produce a surface-characteristics file (check aers_dir logs).")
+  writeLines(sig, sig_file)      # record settings so an identical re-run can skip
   normalizePath(sfc)
 }

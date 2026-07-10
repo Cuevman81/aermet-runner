@@ -94,8 +94,26 @@ res <- run_full_pipeline("KJAN", 2020, 2024, output_root = "runs")
 runs/<ICAO>_<y1>_<y2>/
   <ICAO>/                     # AERMET working + output files (.sfc, .pfl, report, zip)
     aersurface/               # NLCD clips, control file, AERSURFACE outputs
-  cache/                      # station lists (reused between runs)
+  cache/                      # station lists, precip records, per-site NLCD (reused)
 ```
+
+### Reusing previous work (caching)
+
+Re-running a station is cheap — the app only redoes what actually changed:
+
+- **Met data** (GHCNh hourly, 1-min/5-min ASOS, IGRA upper air) is written to the
+  run folder and **reused as-is** on any later run of the same station/years — it
+  is never re-downloaded.
+- **NLCD land cover** is cached per site, so it is fetched from MRLC **once** and
+  reused for other year windows and for every AERSURFACE re-run.
+- **AERSURFACE** records the settings it ran with. If you re-run with the **same**
+  options it is **skipped entirely** (the `.sfc` is reused); if you change an
+  option that affects it — e.g. flip **Surface moisture** from Auto/Wet to **Dry** —
+  it re-runs using the cached NLCD (no re-download) and AERMET rebuilds from the
+  new surface characteristics.
+
+So a typical "same site, try Dry instead" re-run does no network downloads at
+all: it just re-runs AERSURFACE on the cached land cover and rebuilds AERMET.
 
 ## AERSURFACE options
 

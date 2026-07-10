@@ -35,7 +35,8 @@ fetch_aersurface_file <- function(station_code, root_directory, start_year, end_
   aers_dir <- file.path(root_directory, station_code, "aersurface")
   sfc <- run_aersurface(icao = ctx$icao, name = ctx$name, lat = ctx$lat, lon = ctx$lon,
                         aers_dir = aers_dir, app_root = ctx$app_root,
-                        opts = ctx$aers_opts, progress = ctx$progress %||% function(m, f) {})
+                        opts = ctx$aers_opts, nlcd_cache_dir = ctx$nlcd_cache_dir,
+                        progress = ctx$progress %||% function(m, f) {})
   dest_name <- basename(sfc)
   dest <- file.path(root_directory, station_code, dest_name)
   file.copy(sfc, dest, overwrite = TRUE)
@@ -102,14 +103,27 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   run_dir <- file.path(output_root, sprintf("%s_%d_%d", icao, y1, y2))
   dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # Publish context for the overridden seams
-  pipeline_env$icao      <- icao
-  pipeline_env$name      <- st$name
-  pipeline_env$lat       <- st$lat
-  pipeline_env$lon       <- st$lon
-  pipeline_env$aers_opts <- opts
-  pipeline_env$app_root  <- APP_ROOT
-  pipeline_env$progress  <- progress
+  # Publish context for the overridden seams. The NLCD cache is site-level (keyed
+  # by ICAO + NLCD year), so it survives across year windows and moisture re-runs.
+  pipeline_env$icao           <- icao
+  pipeline_env$name           <- st$name
+  pipeline_env$lat            <- st$lat
+  pipeline_env$lon            <- st$lon
+  pipeline_env$aers_opts      <- opts
+  pipeline_env$app_root       <- APP_ROOT
+  pipeline_env$progress       <- progress
+  pipeline_env$nlcd_cache_dir <- file.path(cache_dir, "nlcd",
+                                           sprintf("%s_%s", icao, as.character(opts$nlcd_year %||% 2021)))
+
+  # Note whether the met data is already local (the engine skips re-downloading
+  # GHCNh / IGRA / 1-min & 5-min ASOS when the files exist), so a re-run that only
+  # changes an AERSURFACE option (e.g. moisture) never re-fetches met data.
+  station_dir <- file.path(run_dir, icao)
+  met_cached <- length(list.files(station_dir, pattern = "_GHCNh_.*\\.psv$")) > 0 ||
+    (dir.exists(file.path(station_dir, "1min")) &&
+       length(list.files(file.path(station_dir, "1min"), pattern = "\\.dat$")) > 0)
+  progress(if (met_cached) "Reusing cached met data from a previous run (no re-download) ..."
+           else "Fetching met data (first run for this station/years) ...", 0.05)
 
   progress(sprintf("Starting AERMET build for %s (%s) | UA: %s, %.0f km",
                    icao, st$name, st$ua_station_id, st$ua_dist_km), 0.05)
