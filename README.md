@@ -41,11 +41,30 @@ the station resolution and the on-demand AERSURFACE step are added on top.
   Rscript install_deps.R      # shiny, leaflet, httr, readr, dplyr, stringr, terra
   ```
 - **Internet** — NCEI (GHCNh/ASOS/IGRA/ISD), MRLC (NLCD).
-- **The bundled binaries** in `bin/` — EPA **AERMET / AERMINUTE / AERSURFACE
-  26135** for Windows and macOS, plus the AERSURFACE datum files. These are
-  public-domain EPA releases, shipped so the tool is clone-and-run. *(Linux
-  users: drop in Linux builds named `aermet_26135`, `aerminute_26135`,
-  `aersurface_26135_mac`→`aersurface` per your build, or compile from EPA source.)*
+- **The bundled binaries** in `bin/` — public-domain EPA **AERMET / AERMINUTE /
+  AERSURFACE v26135**, shipped so the tool is clone-and-run (see Platform support).
+
+## Platform support
+
+The R code and all data sources are cross-platform; the only OS-specific piece is
+the three EPA executables. The app auto-selects the right build:
+
+| OS | Binaries used | Status |
+|----|---------------|--------|
+| **Windows** | `bin/<tool>_26135.exe` (official EPA v26135) | ✅ works out of the box |
+| **macOS** | `bin/<tool>_26135_mac` | ✅ works out of the box* |
+| **Linux** | `bin/<tool>_26135_linux` | ⚠️ add binaries (see below) |
+
+- **Windows / macOS:** everything needed is bundled — clone and run.
+- **\*macOS Gatekeeper:** the Mac builds are unsigned, so the first run may be
+  blocked. Clear the quarantine flag once: `xattr -dr com.apple.quarantine bin/`
+  (or right-click each binary → Open). The Mac builds are Intel; on Apple Silicon
+  they run under Rosetta 2.
+- **Linux:** EPA does not distribute Linux binaries, so compile AERMET, AERMINUTE
+  and AERSURFACE v26135 from EPA source with `gfortran` and place them in `bin/`
+  as `aermet_26135_linux`, `aerminute_26135_linux`, `aersurface_26135_linux`. The
+  app looks for exactly those names and prints a reminder if they're missing.
+  (Linux also needs system GDAL/PROJ for the `terra` package — see `install_deps.R`.)
 
 ## Run it
 

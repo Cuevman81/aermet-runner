@@ -20,14 +20,13 @@ if (!exists("APP_ROOT")) stop("APP_ROOT must be set before sourcing pipeline.R (
 # Per-run context read by the overridden seams (single-threaded Shiny session).
 pipeline_env <- new.env()
 
-# ---- Seam 1: binaries live in <app_root>/bin ---------------------------------
+# ---- Seam 1: binaries live in <app_root>/bin (OS-aware; see bin_candidates) ---
 find_exe <- function(tool, station_dir, root_directory) {
-  win <- .Platform$OS.type == "windows"
-  cands <- if (win) file.path(pipeline_env$app_root, "bin", sprintf("%s_26135.exe", tool))
-           else c(file.path(pipeline_env$app_root, "bin", sprintf("%s_26135_mac", tool)),
-                  file.path(pipeline_env$app_root, "bin", tool))
-  for (p in cands) if (file.exists(p)) return(normalizePath(p))
-  stop(sprintf("%s executable not found in %s/bin", tool, pipeline_env$app_root))
+  for (p in bin_candidates(pipeline_env$app_root, tool))
+    if (file.exists(p)) return(normalizePath(p))
+  stop(sprintf(paste0("%s executable not found in %s/bin for %s. ",
+       "Linux users: compile %s 26135 from EPA source and place it as bin/%s_26135_linux."),
+       tool, pipeline_env$app_root, os_tag(), tool, tool))
 }
 
 # ---- Seam 2: AERSURFACE on demand --------------------------------------------

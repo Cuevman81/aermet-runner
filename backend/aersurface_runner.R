@@ -118,12 +118,28 @@ default_aersurface_opts <- function(lat) {
     "OU FINISHED")
 }
 
-# Locate the AERSURFACE binary + datum files bundled in bin/
+# OS tag used to pick the right bundled binary: "windows" | "macos" | "linux"
+os_tag <- function() {
+  s <- Sys.info()[["sysname"]]
+  if (identical(s, "Windows")) "windows" else if (identical(s, "Darwin")) "macos" else "linux"
+}
+
+# Candidate binary paths for a tool on the current OS (first existing wins).
+# Windows -> <tool>_26135.exe ; macOS -> <tool>_26135_mac ; Linux -> <tool>_26135_linux
+bin_candidates <- function(app_root, tool) {
+  b <- file.path(app_root, "bin")
+  switch(os_tag(),
+    windows = file.path(b, sprintf("%s_26135.exe", tool)),
+    macos   = c(file.path(b, sprintf("%s_26135_mac", tool)),   file.path(b, tool)),
+    linux   = c(file.path(b, sprintf("%s_26135_linux", tool)), file.path(b, tool)))
+}
+
+# Locate the AERSURFACE binary bundled in bin/ (Linux users must supply theirs).
 .aersurface_exe <- function(app_root) {
-  win <- .Platform$OS.type == "windows"
-  exe <- file.path(app_root, "bin", if (win) "aersurface_26135.exe" else "aersurface_26135_mac")
-  if (!file.exists(exe)) stop(sprintf("AERSURFACE binary not found: %s", exe))
-  normalizePath(exe)
+  for (p in bin_candidates(app_root, "aersurface")) if (file.exists(p)) return(normalizePath(p))
+  stop(sprintf(paste0("AERSURFACE binary not found in %s/bin for %s.\n",
+       "Linux users: compile AERSURFACE 26135 from EPA source and place it as ",
+       "bin/aersurface_26135_linux."), app_root, os_tag()))
 }
 
 # Main entry: run AERSURFACE for a site, return the full path to the .sfc file.
