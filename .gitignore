@@ -1,0 +1,22 @@
+# Run outputs and downloaded data (generated at runtime)
+runs/
+cache/
+*.psv
+*.dat
+*.gz
+
+# R session files
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp
+.Ruserdata
+.Rproj.user/
+.Renviron
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NOTE: bin/ (EPA AERMET/AERMINUTE/AERSURFACE 26135 executables + datum files)
+# IS tracked on purpose so the tool is clone-and-run.
