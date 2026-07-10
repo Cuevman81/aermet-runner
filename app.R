@@ -25,6 +25,7 @@ CUR_YEAR <- as.integer(format(Sys.Date(), "%Y"))
 # --- App / engine metadata (update these when the bundled EPA binaries change) --
 APP_VERSION    <- "1.0"
 ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE
+ENGINE_ASOF    <- "July 9, 2026"   # date the bundled EPA versions were confirmed current
 NLCD_YEAR      <- 2021             # NLCD product used by AERSURFACE
 CONTACT_NAME   <- "Rodney Cuevas"
 CONTACT_EMAIL  <- "RCuevas@mdeq.ms.gov"
@@ -41,6 +42,8 @@ ui <- fluidPage(
     .verbadge { display:inline-block; background:#eef4fa; border:1px solid #cfe0f0;
                 color:#134a76; font-size:12px; font-weight:600; padding:4px 10px;
                 border-radius:4px; margin:4px 0 8px; }
+    .verbadge-asof { display:block; font-weight:400; font-size:11px;
+                     color:#2e6b3e; margin-top:2px; }
     .footer { border-top:1px solid #ddd; margin-top:14px; padding-top:10px;
               font-size:12px; color:#555; }
     .footer a { color:#005ea2; }
@@ -64,7 +67,9 @@ ui <- fluidPage(
   div(class = "verbadge",
       sprintf("Processing with EPA AERMET %s · AERMINUTE %s · AERSURFACE %s",
               ENGINE_VERSION, ENGINE_VERSION, ENGINE_VERSION),
-      sprintf("  |  NLCD %d  |  running: %s  |  app v%s", NLCD_YEAR, PLATFORM_LABEL, APP_VERSION)),
+      sprintf("  |  NLCD %d  |  running: %s  |  app v%s", NLCD_YEAR, PLATFORM_LABEL, APP_VERSION),
+      tags$span(class = "verbadge-asof",
+                sprintf("latest EPA versions · current as of %s", ENGINE_ASOF))),
   sidebarLayout(
     sidebarPanel(
       width = 4,
@@ -106,8 +111,8 @@ ui <- fluidPage(
     fluidRow(
       column(8,
         tags$p(tags$b("Processing engine: "),
-          sprintf("EPA AERMET %s · AERMINUTE %s · AERSURFACE %s (bundled). ",
-                  ENGINE_VERSION, ENGINE_VERSION, ENGINE_VERSION),
+          sprintf("EPA AERMET %s · AERMINUTE %s · AERSURFACE %s (bundled; latest EPA builds as of %s). ",
+                  ENGINE_VERSION, ENGINE_VERSION, ENGINE_VERSION, ENGINE_ASOF),
           sprintf("NLCD %d land cover via MRLC. ", NLCD_YEAR),
           "Surface: GHCNh (NCEI) · Winds: 1-minute ASOS · Upper air: IGRA2."),
         tags$p(tags$em("Automated defaults (AERSURFACE seasons/moisture, AP/NONAP ",
