@@ -265,6 +265,73 @@ fixes were also applied upstream in the MDEQ production `AERMET.R` on 2026-07-26
 and `backend/engine.R` re-synced from it, so the two stay byte-identical; the
 wrappers remain as idempotent guards against an un-patched re-sync.
 
+### GHCNh quality screening (v1.3)
+
+> [!IMPORTANT]
+> This one **does** change the `.sfc` files. Datasets built before v1.3 can contain
+> observations NCEI flagged as suspect or erroneous. Re-run affected stations.
+
+AERMET reads the NCEI GHCNh `.psv` as delivered and does **not** act on the
+per-element quality codes NCEI attaches to every observation, so flagged values
+reach the `.sfc` verbatim. At KMEI that put 50 hours of exactly 30.16 m/s into
+April–May 2025 — all of them `qc=2` ("suspect") on 3-hourly FM12 SYNOP reports —
+and KTUP 2025 carried 25 more. Across an 18-station, 5-year Mississippi dataset it
+was 78 hours out of 789,264 (0.010%), which is negligible for modelled
+concentrations but indefensible in a file a reviewer will open.
+
+Two screens now run before AERMET sees the data. Both only ever **blank** a value,
+so the element becomes missing and AERMET falls back to AERMINUTE or its own
+substitution logic — no record is dropped and no value is altered or invented:
+
+1. **Quality codes.** ISD/GHCNh codes 2 and 6 (*suspect*) and 3 and 7 (*erroneous*)
+   are rejected; 0/1/4/5/9 and blank pass. Applied to every element that carries a
+   `*_Quality_Code` column.
+2. **Wind-speed cross-check.** NCEI carries the verbatim METAR/SPECI text in the
+   `REM` field, so the decoded `wind_speed` can be checked against the report it
+   came from. KMEI 2025-05-01 19:55Z and 19:58Z both decode to 54.1 m/s from a
+   METAR that plainly reads `25010KT` (5.1 m/s) — and NCEI flags one of them
+   `qc=5`, "passed all checks". The quality codes cannot catch that; the
+   cross-check can. Wind *direction* was checked the same way across 821,424 METAR
+   groups with zero disagreement, so only speed is screened.
+
+Every rejection is itemised in `<STATION>_GHCNh_<y1>_<y2>_qc_log.txt` beside the
+data — timestamp, element, rejected value and quality code — so the edit is fully
+auditable. The log is append-safe: re-running over an already-screened file rejects
+nothing and leaves the existing log intact rather than overwriting it with zeroes.
+The QA panel confirms the screen ran and flags any implausible value that survived
+into the delivered files.
+
+### Report content (v1.3)
+
+Both deliverables were rewritten around what a consulting modeller actually needs
+to defend the data, not just what the pipeline happened to compute:
+
+- **Station and provenance** — latitude/longitude, elevation, ICAO/WBAN/USAF, GHCNh
+  station ID, and the wind (10 m) and temperature (2 m) reference heights, none of
+  which appeared anywhere before. Plus the upper-air station with its own
+  coordinates and its **great-circle distance and bearing** from the surface site.
+- **Full AERSURFACE table** — the monthly × sector albedo, Bowen ratio and roughness
+  actually applied, alongside the run settings (NLCD version, ZORAD radius, sector
+  bearings, moisture, snow, arid, high-z0 sectors). Previously summarised as a single
+  "z0 range" line.
+- **Data-quality screening page** — what the GHCNh screen removed, and a physical
+  plausibility sweep of the delivered `.sfc` (max wind, temperature extremes, counts
+  outside bounds) reported per year whether or not anything is found.
+- **Calms and missing hours** — counted explicitly, with a note that AERMOD excludes
+  both from the averaging period.
+- **File guidance** — what `.sfc` and `.pfl` each carry, the regular vs `US` (ADJ_U*)
+  distinction and the warning not to mix them, and an explanation that the 24 hours
+  of 1 January of the following year at the end of each file are expected by AERMOD
+  and are not duplicated data.
+- **Monthly completeness heatmap reframed.** The EPA criterion is quarterly, so the
+  monthly grid now shows quarter boundaries and the quarterly figures alongside it,
+  labelled as diagnostic. It answers "*which month cost me that quarter?*" — for
+  example a quarter passing at 90.3% where one month sits at 81% — without implying
+  a monthly standard that does not exist.
+- **Verification report** now opens with an overall **PASS / FAIL** verdict
+  (quarters met, AERMET errors, non-physical values) and closes with per-file MD5
+  checksums and hour counts.
+
 ## AERSURFACE options
 
 The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:

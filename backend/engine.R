@@ -249,6 +249,176 @@ download_ghcnh <- function(station_code, wban, start_year, end_year, station_dir
   out_file
 }
 
+# ------------------------------ GHCNh quality control --------------------------------
+#
+# AERMET reads the GHCNh .psv as delivered and does not honour NCEI's per-element
+# quality flags, so observations NCEI itself marked "suspect" or "erroneous" reach the
+# .sfc verbatim.  At KMEI that put 50 hours of 30.16 m/s into April-May 2025 (every one
+# of them qc=2 on a 3-hourly FM12 SYNOP report); KTUP 2025 carried 25 more.
+#
+# Two independent screens are applied.  Both only ever blank a value -- the element
+# becomes missing for that observation and AERMET falls back to AERMINUTE or to its own
+# substitution logic.  No record is dropped and no value is altered or invented, so the
+# edit stays defensible and is fully auditable from the log written beside the file.
+#
+#   1. Quality codes.  ISD/GHCNh codes 2 and 6 mean "suspect", 3 and 7 "erroneous";
+#      0/1/4/5/9 and blank pass.  Applied to every element carrying a *_Quality_Code.
+#
+#   2. Wind-speed cross-check.  NCEI carries the verbatim METAR/SPECI text in REM, so
+#      the decoded wind_speed can be checked against the report it came from.  KMEI
+#      2025-05-01 19:55Z and 19:58Z both decode to 54.1 m/s from a METAR that plainly
+#      reads 25010KT (5.1 m/s), and NCEI flags one of them qc=5 "passed all checks" --
+#      a decoding error the quality flags miss entirely.  Wind direction was checked
+#      the same way across 821,424 METAR groups with zero disagreement, so only speed
+#      is screened.
+#
+# The function is idempotent: a blanked value cannot be blanked twice, so re-running
+# the pipeline over an already-filtered .psv is a no-op.
+
+GHCNH_BAD_QC <- c("2", "3", "6", "7")   # suspect (2,6) and erroneous (3,7)
+GHCNH_WS_TOL <- 5                       # m/s; decoded-vs-METAR tolerance
+GHCNH_KT     <- 0.514444
+
+ghcnh_isopen <- function(cc) tryCatch(isOpen(cc), error = function(e) FALSE)
+
+# knots from the wind group of a METAR/SPECI report ("25010KT", "VRB03G15KT", ...)
+metar_wind_kt <- function(rem) {
+  m <- regmatches(rem, regexpr("\\b(\\d{3}|VRB)\\d{2,3}(G\\d{2,3})?KT\\b", rem))
+  if (!length(m)) return(NA_real_)
+  suppressWarnings(as.numeric(sub("^(\\d{3}|VRB)(\\d{2,3}).*$", "\\2", m)))
+}
+
+filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
+                                 verbose = TRUE) {
+  if (!file.exists(psv_file) || file.size(psv_file) == 0)
+    stop("GHCNh file not found: ", psv_file)
+  if (is.null(log_file))
+    log_file <- sub("\\.psv$", "_qc_log.txt", psv_file)
+
+  con <- file(psv_file, "r"); out <- NULL
+  on.exit({
+    for (cc in list(con, out))
+      if (!is.null(cc) && inherits(cc, "connection") && ghcnh_isopen(cc))
+        try(close(cc), silent = TRUE)
+  }, add = TRUE)
+
+  header <- readLines(con, n = 1L, warn = FALSE)
+  cols   <- strsplit(header, "|", fixed = TRUE)[[1]]
+  ncol   <- length(cols)
+
+  qc_idx  <- grep("_Quality_Code$", cols); qc_idx <- qc_idx[qc_idx > 2L]
+  val_idx <- qc_idx - 2L            # layout: value, Measurement_Code, Quality_Code, ...
+  elem    <- sub("_Quality_Code$", "", cols[qc_idx])
+  keep    <- cols[val_idx] == elem  # only trust the pairing where it really lines up
+  qc_idx  <- qc_idx[keep]; val_idx <- val_idx[keep]; elem <- elem[keep]
+
+  i_ws  <- match("wind_speed", cols)
+  i_rem <- match("REM", cols)
+  i_t   <- match("DATE", cols); if (is.na(i_t)) i_t <- 3L
+
+  tmp <- paste0(psv_file, ".qctmp")
+  out <- file(tmp, "w")
+  writeLines(header, out)
+
+  counts <- setNames(integer(length(elem)), elem)
+  n_ws_x <- 0L
+  audit  <- list(); xaudit <- list()
+  nrec   <- 0L
+
+  repeat {
+    lines <- readLines(con, n = chunk, warn = FALSE)
+    if (!length(lines)) break
+    nrec <- nrec + length(lines)
+
+    f   <- strsplit(lines, "|", fixed = TRUE)
+    len <- lengths(f)
+    if (any(len < ncol))
+      f[len < ncol] <- lapply(f[len < ncol], function(v) c(v, rep("", ncol - length(v))))
+    m <- matrix(unlist(f, use.names = FALSE), nrow = length(f), byrow = TRUE)
+
+    # --- screen 1: NCEI quality codes ---
+    for (j in seq_along(qc_idx)) {
+      bad <- m[, qc_idx[j]] %in% GHCNH_BAD_QC & nzchar(m[, val_idx[j]])
+      if (!any(bad)) next
+      counts[j] <- counts[j] + sum(bad)
+      audit[[length(audit) + 1L]] <- data.frame(
+        timestamp = m[bad, i_t], element = elem[j],
+        value = m[bad, val_idx[j]], qc = m[bad, qc_idx[j]], stringsAsFactors = FALSE)
+      m[bad, val_idx[j]] <- ""
+    }
+
+    # --- screen 2: decoded wind speed vs the METAR it came from ---
+    if (!is.na(i_ws) && !is.na(i_rem)) {
+      w <- suppressWarnings(as.numeric(m[, i_ws]))
+      cand <- which(!is.na(w) & nzchar(m[, i_rem]))
+      if (length(cand)) {
+        kt <- vapply(m[cand, i_rem], metar_wind_kt, numeric(1), USE.NAMES = FALSE)
+        mw <- kt * GHCNH_KT
+        off <- which(!is.na(mw) & abs(mw - w[cand]) > GHCNH_WS_TOL)
+        if (length(off)) {
+          r <- cand[off]
+          n_ws_x <- n_ws_x + length(r)
+          xaudit[[length(xaudit) + 1L]] <- data.frame(
+            timestamp = m[r, i_t], decoded = m[r, i_ws],
+            metar = sprintf("%.1f", mw[off]), rem_kt = sprintf("%g", kt[off]),
+            stringsAsFactors = FALSE)
+          m[r, i_ws] <- ""
+        }
+      }
+    }
+
+    writeLines(apply(m, 1L, paste, collapse = "|"), out)
+  }
+
+  close(out); out <- NULL
+  close(con); con <- NULL
+  if (!file.rename(tmp, psv_file)) { unlink(tmp); stop("could not replace ", psv_file) }
+
+  hit <- counts[counts > 0]
+  lg <- c(sprintf("GHCNh quality-control filter log -- %s", basename(psv_file)),
+          sprintf("Applied: %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), "",
+          "Rejected values are blanked so AERMET treats the element as missing for that",
+          "observation.  No record is dropped and no value is altered or substituted.",
+          "",
+          sprintf("Records scanned        : %d", nrec),
+          sprintf("Screen 1 (NCEI flags)  : %d values rejected", sum(counts)),
+          sprintf("Screen 2 (METAR check) : %d wind speeds rejected", n_ws_x), "",
+          "SCREEN 1 -- NCEI quality codes 2/6 (suspect) and 3/7 (erroneous)")
+  if (length(hit)) {
+    aud <- do.call(rbind, audit)
+    lg <- c(lg, sprintf("   %-30s %6d", names(hit), hit), "",
+            "   Detail (timestamp | element | rejected value | quality code):",
+            sprintf("   %s | %s | %s | %s", aud$timestamp, aud$element, aud$value, aud$qc))
+  } else lg <- c(lg, "   none")
+  lg <- c(lg, "",
+          sprintf("SCREEN 2 -- decoded wind_speed vs METAR text (tolerance %g m/s)",
+                  GHCNH_WS_TOL))
+  if (n_ws_x) {
+    xa <- do.call(rbind, xaudit)
+    lg <- c(lg, "   Detail (timestamp | decoded m/s | METAR m/s | METAR kt):",
+            sprintf("   %s | %s | %s | %s", xa$timestamp, xa$decoded, xa$metar, xa$rem_kt))
+  } else lg <- c(lg, "   none")
+
+  # The log is the audit trail for values that are no longer present in the .psv, so
+  # it has to survive a re-run.  Re-processing an already-screened file rejects
+  # nothing; leave the existing log as it stands rather than overwriting it with
+  # zeroes and destroying the record of the first pass.
+  if (sum(counts) == 0 && n_ws_x == 0 && file.exists(log_file)) {
+    if (verbose)
+      cat(sprintf("QC filter: %s already screened; existing log left intact\n",
+                  basename(psv_file)))
+    return(invisible(list(records = nrec, rejected = 0L, ws_crosscheck = 0L,
+                          by_element = integer(0), log_file = log_file)))
+  }
+  writeLines(lg, log_file)
+
+  if (verbose)
+    cat(sprintf("QC filter: %s -- %d records, %d flagged + %d METAR-mismatch rejected\n",
+                basename(psv_file), nrec, sum(counts), n_ws_x))
+  invisible(list(records = nrec, rejected = sum(counts), ws_crosscheck = n_ws_x,
+                 by_element = hit, log_file = log_file))
+}
+
 download_igra_data <- function(ua_station_id, start_year, end_year,
                                root_directory, station_code, timeout = 600) {
   icao_code <- get_icao_from_igra(ua_station_id)
@@ -743,60 +913,347 @@ parse_rp2_file <- function(rp2_file) {
   stats
 }
 
+# ------------------------- verification report helpers --------------------------------
+
+# Parse an AERSURFACE .txt: the commented header carries every run setting a reviewer
+# asks about, and the SITE_CHAR rows are the monthly x sector surface characteristics
+# that AERMET actually applied.
+parse_aersurface_file <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  ln <- readLines(path, warn = FALSE)
+  # Header keys contain regex metacharacters ("Zo Radius (m)"), so match them
+  # literally and take what follows, then strip the trailing ** that closes each
+  # AERSURFACE header comment.
+  hv <- function(key, default = NA_character_) {
+    h <- grep(key, ln, fixed = TRUE, value = TRUE)
+    if (!length(h)) return(default)
+    p <- regexpr(key, h[1], fixed = TRUE)
+    v <- substring(h[1], p + attr(p, "match.length"))
+    trimws(sub("\\*+\\s*$", "", sub("^\\s*:?\\s*", "", v)))
+  }
+  sec <- grep("^\\s*SECTOR\\s", ln, value = TRUE)
+  sectors <- if (length(sec)) {
+    p <- do.call(rbind, lapply(strsplit(trimws(sec), "\\s+"), function(v)
+      data.frame(id = as.integer(v[2]), start = as.numeric(v[3]),
+                 end = as.numeric(v[4]), stringsAsFactors = FALSE)))
+    p
+  } else NULL
+  sc <- grep("^\\s*SITE_CHAR\\s", ln, value = TRUE)
+  tab <- if (length(sc)) {
+    do.call(rbind, lapply(strsplit(trimws(sc), "\\s+"), function(v)
+      data.frame(month = as.integer(v[2]), sector = as.integer(v[3]),
+                 albedo = as.numeric(v[4]), bowen = as.numeric(v[5]),
+                 z0 = as.numeric(v[6]), stringsAsFactors = FALSE)))
+  } else NULL
+  list(
+    version   = sub("\\s.*$", "", hv("Generated by AERSURFACE, Version", "")),
+    lat       = suppressWarnings(as.numeric(hv("Center Latitude  (decimal degrees)"))),
+    lon       = suppressWarnings(as.numeric(hv("Center Longitude (decimal degrees)"))),
+    datum     = hv("Datum"),
+    nlcd      = hv("NLCD Version"),
+    zo_method = hv("Zo Method"),
+    zo_radius = hv("Zo Radius (m)"),
+    snow      = hv("Continuous snow cover"),
+    moisture  = hv("Surface moisture"),
+    highz0    = hv("High Z0 (Non-Airport) Sector IDs"),
+    sectors   = sectors, table = tab)
+}
+
+# great-circle distance and compass bearing, for the surface-to-upper-air separation
+# that representativeness reviews always ask for
+gc_km <- function(lat1, lon1, lat2, lon2) {
+  r <- pi / 180
+  6371 * acos(pmin(1, sin(lat1*r)*sin(lat2*r) +
+                      cos(lat1*r)*cos(lat2*r)*cos((lon2-lon1)*r)))
+}
+gc_dir <- function(lat1, lon1, lat2, lon2) {
+  r <- pi / 180
+  y <- sin((lon2-lon1)*r) * cos(lat2*r)
+  x <- cos(lat1*r)*sin(lat2*r) - sin(lat1*r)*cos(lat2*r)*cos((lon2-lon1)*r)
+  b <- (atan2(y, x) / r + 360) %% 360
+  c("N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW",
+    "W","WNW","NW","NNW")[floor(((b + 11.25) %% 360) / 22.5) + 1]
+}
+
+# AERMOD reference heights are written into every .sfc row (cols 18 and 20) but have
+# never been stated anywhere in the deliverable
+sfc_ref_heights <- function(sfc_file) {
+  if (!file.exists(sfc_file)) return(list(wind = NA_real_, temp = NA_real_))
+  ln <- readLines(sfc_file, n = 3, warn = FALSE)
+  if (length(ln) < 2) return(list(wind = NA_real_, temp = NA_real_))
+  f <- strsplit(trimws(ln[2]), "\\s+")[[1]]
+  list(wind = suppressWarnings(as.numeric(f[18])),
+       temp = suppressWarnings(as.numeric(f[20])))
+}
+
+# Physical-plausibility screen of the DELIVERED files.  This is the check that would
+# have caught the suspect GHCNh winds on its own, so it is reported per year whether
+# or not anything is found.
+screen_sfc_extremes <- function(station_dir, station_code, years) {
+  out <- list()
+  for (y in years) {
+    d <- read_sfc_data(station_dir, station_code, y)
+    if (is.null(d) || !nrow(d)) next
+    d <- d[!is.na(d$year) & year_matches(d$year, y), , drop = FALSE]
+    ws <- d$ws[!is.na(d$ws)]; tc <- d$temp[!is.na(d$temp)] - 273.15
+    out[[as.character(y)]] <- list(
+      ws_max = if (length(ws)) max(ws) else NA_real_,
+      t_min  = if (length(tc)) min(tc) else NA_real_,
+      t_max  = if (length(tc)) max(tc) else NA_real_,
+      n_ws_hi = sum(ws > 25), n_t_out = sum(tc > 45 | tc < -25))
+  }
+  out
+}
+
+# Condense the GHCNh QC filter log for the reader
+qc_log_summary <- function(station_dir, station_code) {
+  f <- file.path(station_dir, sprintf("%s_GHCNh_2021_2025_qc_log.txt", station_code))
+  if (!file.exists(f)) {
+    g <- list.files(station_dir, pattern = "_qc_log\\.txt$", full.names = TRUE)
+    if (!length(g)) return(NULL)
+    f <- g[1]
+  }
+  ln <- readLines(f, warn = FALSE)
+  gi <- function(p) {
+    h <- grep(p, ln, value = TRUE)
+    if (!length(h)) return(NA_integer_)
+    suppressWarnings(as.integer(sub("^\\D*?(\\d+).*$", "\\1", sub(p, "", h[1]))))
+  }
+  list(records = gi("Records scanned\\s*:"),
+       flagged = gi("Screen 1 \\(NCEI flags\\)\\s*:"),
+       metar   = gi("Screen 2 \\(METAR check\\)\\s*:"),
+       file    = basename(f))
+}
+
 generate_verification_report <- function(results, station_code, start_year, end_year) {
   station_dir <- results$station_dir
   report_file <- file.path(station_dir, sprintf("%s_verification_report.txt", station_code))
-  rc <- c(sprintf("AERMET Processing Verification Report for %s", station_code),
-          sprintf("Period: %d-%d  |  AERMET %s (GHCNh surface data)",
-                  start_year, end_year, AERMET_VERSION),
-          sprintf("Generated: %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), "",
-          "1. Software Version")
-  if (!is.null(results$versions$aermet))
-    rc <- c(rc, sprintf("   AERMET: %s", results$versions$aermet))
+  years <- start_year:end_year
+  W <- 78
+  rule <- function(ch = "=") paste(rep(ch, W), collapse = "")
 
-  rc <- c(rc, "", "2. Annual Processing Statistics (from .RP2)")
-  for (year in start_year:end_year) {
-    stats <- parse_rp2_file(file.path(station_dir, sprintf("%s%d.RP2", station_code, year)))
-    if (is.null(stats)) { rc <- c(rc, sprintf("   Year %d: RP2 not found", year)); next }
-    rc <- c(rc, sprintf("   Year %d:", year),
-            sprintf("     UA obs: %s | Surface obs: %s | ASOS 1-min hrs: %s",
-                    fmt_int(stats$ua_obs), fmt_int(stats$surface_obs), fmt_int(stats$asos_obs)),
-            sprintf("     Calms: %s | Variable winds: %s | CC subs: %s | T subs: %s",
-                    fmt_int(stats$total_calms), fmt_int(stats$variable_winds),
-                    fmt_int(stats$cloud_cover_subs), fmt_int(stats$temp_subs)),
-            sprintf("     Errors: %s | Warnings: %s",
-                    fmt_int(stats$error_count), fmt_int(stats$warning_count)))
-  }
+  # ---- gather ----
+  reg <- STATION_REGISTRY[STATION_REGISTRY$code == station_code, ]
+  sid <- if (nrow(reg)) reg$station_id[1] else NA_character_
+  uid <- if (nrow(reg)) reg$ua_station_id[1] else NA_character_
+  cache_dir <- file.path(dirname(station_dir), "cache")
+  meta <- tryCatch({
+    isd <- get_isd_history(cache_dir); igr <- get_igra_info(cache_dir)
+    s <- isd[isd$station_id == sid, ][1, ]
+    if (is.na(s$usaf)) s <- isd[!is.na(isd$icao) & isd$icao == station_code, ][1, ]
+    u <- igr[igr$igra_id == uid, ][1, ]
+    list(s = s, u = u)
+  }, error = function(e) NULL)
 
-  rc <- c(rc, "", "3. Data Completeness (EPA target: 90% per quarter)")
-  for (year in names(results$data_completeness)) {
-    yd <- results$data_completeness[[year]]
-    if (!is.null(yd$error)) { rc <- c(rc, sprintf("   Year %s: %s", year, yd$error)); next }
-    if (!is.null(yd$annual))
-      rc <- c(rc, sprintf("   Year %s: %.1f%% annual (%s), %d calm hrs, %d missing hrs",
-                          year, yd$annual$completeness_pct,
-                          if (yd$annual$meets_epa) "PASS" else "FAIL",
-                          yd$annual$calm_hours, yd$annual$missing_hours))
+  aers <- parse_aersurface_file(file.path(station_dir,
+            sprintf("%s_2021_aers_sfc.txt", tolower(station_code))))
+  refh <- sfc_ref_heights(file.path(station_dir, sprintf("%s%d.sfc", station_code, start_year)))
+  ext  <- screen_sfc_extremes(station_dir, station_code, years)
+  qcs  <- qc_log_summary(station_dir, station_code)
+  rp   <- lapply(setNames(years, years), function(y)
+            parse_rp2_file(file.path(station_dir, sprintf("%s%d.RP2", station_code, y))))
+
+  # ---- overall verdict ----
+  q_fail <- 0L; q_tot <- 0L
+  for (y in names(results$data_completeness)) {
+    yd <- results$data_completeness[[y]]
+    if (!is.null(yd$error)) next
     for (q in names(yd$quarters)) {
       qd <- yd$quarters[[q]]
-      if (!is.null(qd$completeness_pct))
-        rc <- c(rc, sprintf("     %s: %.1f%% (%s)", q, qd$completeness_pct,
-                            if (isTRUE(qd$meets_epa)) "PASS" else "FAIL"))
+      if (is.null(qd$completeness_pct)) next
+      q_tot <- q_tot + 1L
+      if (!isTRUE(qd$meets_epa)) q_fail <- q_fail + 1L
     }
   }
+  n_err <- sum(vapply(rp, function(s)
+    if (is.null(s) || is.null(s$error_count) || is.na(s$error_count)) 0L
+    else as.integer(s$error_count), integer(1)))
+  n_phys <- sum(vapply(ext, function(e) as.integer(e$n_ws_hi + e$n_t_out), integer(1)))
+  verdict <- if (q_fail == 0 && n_err == 0 && n_phys == 0) "PASS" else
+             if (q_fail > 0 || n_err > 0) "FAIL" else "PASS WITH NOTES"
 
-  rc <- c(rc, "", "4. Output Files")
-  for (year in start_year:end_year) {
-    for (suffix in c("", "US")) {
-      for (ext in c("sfc", "pfl")) {
-        f <- file.path(station_dir, sprintf("%s%d%s.%s", station_code, year, suffix, ext))
-        rc <- c(rc, if (file.exists(f))
-          sprintf("   %s%d%s.%s: %.2f MB", station_code, year, suffix, ext,
-                  file.size(f) / 1024^2)
-          else sprintf("   %s%d%s.%s: MISSING", station_code, year, suffix, ext))
-      }
-    }
+  nm <- if (!is.null(meta) && !is.na(meta$s$station_name)) meta$s$station_name else station_code
+  rc <- c(rule(), sprintf("AERMET PROCESSING VERIFICATION REPORT -- %s (%s)", station_code, nm),
+          sprintf("Period %d-%d   |   Generated %s", start_year, end_year,
+                  format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+          rule(), "",
+          sprintf("OVERALL RESULT: %s", verdict),
+          sprintf("   Quarters meeting the EPA 90%% criterion : %d of %d", q_tot - q_fail, q_tot),
+          sprintf("   AERMET processing errors               : %d", n_err),
+          sprintf("   Non-physical values in delivered .sfc   : %d", n_phys), "")
+
+  # ---- 1. station ----
+  rc <- c(rc, rule("-"), "1. STATION", rule("-"))
+  if (!is.null(meta) && !is.na(meta$s$usaf)) {
+    s <- meta$s
+    rc <- c(rc,
+      sprintf("   Surface station      %s  %s%s", station_code, s$station_name,
+              if (!is.na(s$state) && nzchar(s$state)) paste0(", ", s$state) else ""),
+      sprintf("   ICAO / WBAN / USAF   %s / %s / %s", station_code, s$wban, s$usaf),
+      sprintf("   GHCNh station ID     USW000%s", s$wban),
+      sprintf("   Latitude, longitude  %.4f N, %.4f W", s$lat, abs(s$lon)),
+      sprintf("   Elevation            %.1f m MSL", s$elev_m))
   }
+  rc <- c(rc,
+    sprintf("   Wind reference ht    %.1f m   (AERMOD .sfc column 18)",  refh$wind),
+    sprintf("   Temp reference ht    %.1f m   (AERMOD .sfc column 20)",  refh$temp))
+  if (!is.null(meta) && !is.na(meta$u$igra_id)) {
+    u <- meta$u
+    rc <- c(rc, "",
+      sprintf("   Upper air station    %s  %s", u$igra_id, trimws(u$station_name)),
+      sprintf("   Latitude, longitude  %.4f N, %.4f W", u$lat, abs(u$lon)),
+      sprintf("   Elevation            %.1f m MSL", u$elev_m))
+    if (!is.null(meta$s) && !is.na(meta$s$lat))
+      rc <- c(rc, sprintf("   Separation           %.0f km %s of %s",
+              gc_km(meta$s$lat, meta$s$lon, u$lat, u$lon),
+              gc_dir(meta$s$lat, meta$s$lon, u$lat, u$lon), station_code))
+  }
+  rc <- c(rc, "")
+
+  # ---- 2. software and inputs ----
+  rc <- c(rc, rule("-"), "2. SOFTWARE AND INPUT DATA", rule("-"),
+    sprintf("   AERMET               %s", if (!is.null(results$versions$aermet))
+              results$versions$aermet else AERMET_VERSION),
+    sprintf("   AERMINUTE            %s", AERMET_VERSION),
+    sprintf("   AERSURFACE           %s", if (!is.null(aers) && !is.na(aers$version))
+              aers$version else "26135"),
+    "   Surface data         NCEI GHCNh hourly (replaces the discontinued ISHD)",
+    "   1-minute winds       NCEI ASOS 1-minute and 5-minute, hourly-averaged by",
+    "                        AERMINUTE and merged by AERMET",
+    "   Upper air            NCEI IGRA v2 radiosonde soundings", "")
+
+  # ---- 3. surface characteristics ----
+  rc <- c(rc, rule("-"), "3. SURFACE CHARACTERISTICS (AERSURFACE)", rule("-"))
+  if (!is.null(aers)) {
+    ns <- if (!is.null(aers$sectors)) nrow(aers$sectors) else NA
+    rc <- c(rc,
+      sprintf("   Land cover           NLCD %s (with impervious and canopy)", aers$nlcd),
+      sprintf("   Roughness method     %s, %s m radius, monthly resolution",
+              aers$zo_method, trimws(aers$zo_radius)),
+      sprintf("   Site coordinates     %.6f, %.6f  (%s)", aers$lat, aers$lon, aers$datum),
+      sprintf("   Surface moisture     %s", aers$moisture),
+      sprintf("   Continuous snow      %s", aers$snow),
+      sprintf("   Non-airport sectors  %s", aers$highz0),
+      sprintf("   Sectors              %s", if (is.na(ns)) "n/a" else ns))
+    if (!is.null(aers$sectors))
+      for (i in seq_len(nrow(aers$sectors)))
+        rc <- c(rc, sprintf("      sector %d: %5.1f to %6.1f degrees",
+                aers$sectors$id[i], aers$sectors$start[i], aers$sectors$end[i]))
+    if (!is.null(aers$table)) {
+      rc <- c(rc, "", "   Monthly surface characteristics applied by AERMET:", "",
+              "      Month  Sector   Albedo   Bowen ratio   Roughness z0 (m)",
+              "      -----  ------   ------   -----------   ----------------")
+      t <- aers$table[order(aers$table$sector, aers$table$month), ]
+      rc <- c(rc, sprintf("      %5d  %6d   %6.2f   %11.2f   %16.3f",
+                          t$month, t$sector, t$albedo, t$bowen, t$z0))
+    }
+  } else rc <- c(rc, "   AERSURFACE file not found in the station folder.")
+  rc <- c(rc, "")
+
+  # ---- 4. GHCNh quality control ----
+  rc <- c(rc, rule("-"), "4. SURFACE DATA QUALITY CONTROL", rule("-"))
+  if (!is.null(qcs)) {
+    rc <- c(rc,
+      "   NCEI flags each observation with a quality code that AERMET does not act",
+      "   on, so the GHCNh file is screened before processing.  Rejected values are",
+      "   blanked (treated as missing); no record is dropped and no value is altered.",
+      "",
+      sprintf("   Observations screened            %s", fmt_int(qcs$records)),
+      sprintf("   Rejected, NCEI suspect/erroneous %s", fmt_int(qcs$flagged)),
+      sprintf("   Rejected, METAR cross-check      %s", fmt_int(qcs$metar)),
+      sprintf("   Full detail                      %s", qcs$file))
+  } else {
+    rc <- c(rc, "   No quality-control log found for this station.")
+  }
+  rc <- c(rc, "")
+
+  # ---- 5. annual processing statistics ----
+  rc <- c(rc, rule("-"), "5. ANNUAL PROCESSING STATISTICS (from AERMET .RP2)", rule("-"))
+  for (y in years) {
+    st <- rp[[as.character(y)]]
+    if (is.null(st)) { rc <- c(rc, sprintf("   %d: RP2 not found", y)); next }
+    rc <- c(rc, sprintf("   Year %d", y),
+      sprintf("      Upper air soundings %s | Surface obs %s | 1-min ASOS hrs %s",
+              fmt_int(st$ua_obs), fmt_int(st$surface_obs), fmt_int(st$asos_obs)),
+      sprintf("      Calms %s | Variable winds %s | Cloud subs %s | Temp subs %s",
+              fmt_int(st$total_calms), fmt_int(st$variable_winds),
+              fmt_int(st$cloud_cover_subs), fmt_int(st$temp_subs)),
+      sprintf("      Errors %s | Warnings %s",
+              fmt_int(st$error_count), fmt_int(st$warning_count)))
+  }
+  rc <- c(rc, "")
+
+  # ---- 6. completeness ----
+  rc <- c(rc, rule("-"), "6. DATA COMPLETENESS", rule("-"),
+    "   EPA requires at least 90% valid data per calendar quarter.  The quarterly",
+    "   columns are the compliance test; the annual column is informational.", "",
+    "      Year       Q1       Q2       Q3       Q4     Annual   Result",
+    "      ----   ------   ------   ------   ------   --------   ------")
+  for (y in names(results$data_completeness)) {
+    yd <- results$data_completeness[[y]]
+    if (!is.null(yd$error)) { rc <- c(rc, sprintf("      %s   %s", y, yd$error)); next }
+    qv <- vapply(c("Q1","Q2","Q3","Q4"), function(q) {
+      qd <- yd$quarters[[q]]
+      if (is.null(qd) || is.null(qd$completeness_pct)) NA_real_ else qd$completeness_pct
+    }, numeric(1))
+    ok <- all(!is.na(qv) & qv >= 90)
+    rc <- c(rc, sprintf("      %s   %5.1f%%   %5.1f%%   %5.1f%%   %5.1f%%   %7.1f%%   %s",
+      y, qv[1], qv[2], qv[3], qv[4],
+      if (!is.null(yd$annual)) yd$annual$completeness_pct else NA_real_,
+      if (ok) "PASS" else "FAIL"))
+  }
+  rc <- c(rc, "")
+
+  # ---- 7. physical screening ----
+  rc <- c(rc, rule("-"), "7. PHYSICAL PLAUSIBILITY OF THE DELIVERED FILES", rule("-"),
+    "   Screening of the .sfc files as delivered.  Wind speeds above 25 m/s and",
+    "   temperatures outside -25 to +45 C are reported for review; a non-zero count",
+    "   does not by itself mean the data are wrong, but each should be explainable.", "",
+    "      Year   Max wind   Min temp   Max temp   ws>25 m/s   T out of range",
+    "      ----   --------   --------   --------   ---------   --------------")
+  for (y in years) {
+    e <- ext[[as.character(y)]]
+    if (is.null(e)) next
+    rc <- c(rc, sprintf("      %d   %6.1f m/s   %5.1f C   %5.1f C   %9d   %14d",
+                        y, e$ws_max, e$t_min, e$t_max, e$n_ws_hi, e$n_t_out))
+  }
+  rc <- c(rc, "")
+
+  # ---- 8. calms and missing data ----
+  rc <- c(rc, rule("-"), "8. CALMS AND MISSING DATA", rule("-"),
+    "   AERMOD excludes calm hours (wind speed below the 0.5 m/s threshold) and",
+    "   missing hours from the averaging period, and reports both in its own output.",
+    "   They are counted here so the modeller can anticipate them.", "",
+    "      Year   Calm hrs   Missing hrs   Valid hrs",
+    "      ----   --------   -----------   ---------")
+  for (y in names(results$data_completeness)) {
+    yd <- results$data_completeness[[y]]
+    if (!is.null(yd$error) || is.null(yd$annual)) next
+    a <- yd$annual
+    rc <- c(rc, sprintf("      %s   %8d   %11d   %9d",
+                        y, a$calm_hours, a$missing_hours, a$total_hours - a$missing_hours))
+  }
+  rc <- c(rc, "")
+
+  # ---- 9. output files ----
+  rc <- c(rc, rule("-"), "9. OUTPUT FILES", rule("-"),
+    "   Files without the US suffix were processed WITHOUT the ADJ_U* option; files",
+    "   with the US suffix were processed with METHOD STABLEBL ADJ_U*.  Use one set",
+    "   or the other consistently -- do not mix them within a single AERMOD run.", "",
+    "      File                    Size (MB)   Hours   MD5",
+    "      --------------------   ---------   -----   --------------------------------")
+  for (y in years) for (sx in c("", "US")) for (ex in c("sfc", "pfl")) {
+    fn <- sprintf("%s%d%s.%s", station_code, y, sx, ex)
+    f  <- file.path(station_dir, fn)
+    if (!file.exists(f)) { rc <- c(rc, sprintf("      %-20s   MISSING", fn)); next }
+    nh <- if (ex == "sfc") length(readLines(f, warn = FALSE)) - 1L else NA_integer_
+    rc <- c(rc, sprintf("      %-20s   %9.2f   %5s   %s", fn, file.size(f)/1024^2,
+                        if (is.na(nh)) "-" else nh,
+                        unname(tools::md5sum(f))))
+  }
+  rc <- c(rc, "", rule(),
+    sprintf("End of report -- %s %d-%d", station_code, start_year, end_year), rule())
+
   writeLines(rc, report_file)
   cat(sprintf("Verification report: %s\n", basename(report_file)))
   rc
@@ -954,18 +1411,104 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
                                      AERMET_VERSION, txt),
                              side = 3, line = 3.1, cex = 0.72, col = "grey30", adj = 0)
 
+  # metadata a reviewer needs in order to reproduce or challenge the run
+  reg  <- STATION_REGISTRY[STATION_REGISTRY$code == station_code, ]
+  sid  <- if (nrow(reg)) reg$station_id[1]    else NA_character_
+  uid  <- if (nrow(reg)) reg$ua_station_id[1] else NA_character_
+  meta <- tryCatch({
+    cd <- file.path(dirname(station_dir), "cache")
+    isd <- get_isd_history(cd); igr <- get_igra_info(cd)
+    s <- isd[isd$station_id == sid, ][1, ]
+    if (is.na(s$usaf)) s <- isd[!is.na(isd$icao) & isd$icao == station_code, ][1, ]
+    list(s = s, u = igr[igr$igra_id == uid, ][1, ])
+  }, error = function(e) NULL)
+  aers <- parse_aersurface_file(file.path(station_dir,
+            sprintf("%s_2021_aers_sfc.txt", tolower(station_code))))
+  refh <- sfc_ref_heights(file.path(station_dir,
+            sprintf("%s%d.sfc", station_code, start_year)))
+  qcs  <- qc_log_summary(station_dir, station_code)
+
   pdf(pdf_path, width = 10.5, height = 8, title = sprintf("%s met report", station_code))
   on.exit(dev.off(), add = TRUE)
 
-  ## ---- Page 1: summary ----
+  # shared text-page helper
+  new_text_page <- function(main) {
+    par(mfrow = c(1, 1), mar = c(1, 1, 2, 1))
+    plot.new(); title(main = main)
+    yy <<- 0.94
+  }
+  yy <- 0.94; lh <- 0.031
+  put <- function(txt, x = 0.02, bold = FALSE, col = "black", cex = 0.8) {
+    text(x, yy, txt, adj = 0, cex = cex, font = if (bold) 2 else 1, col = col)
+    yy <<- yy - lh
+  }
+  gap <- function(f = 0.6) yy <<- yy - lh * f
+
+  ## ---- Page 1: station and data provenance ----
+  new_text_page(sprintf("Station and Data Provenance -- %s (%d-%d)",
+                        station_code, start_year, end_year))
+  put("Surface station", bold = TRUE)
+  if (!is.null(meta) && !is.na(meta$s$usaf)) {
+    s <- meta$s
+    put(sprintf("%-24s %s  %s%s", "Station", station_code, s$station_name,
+                if (!is.na(s$state) && nzchar(s$state)) paste0(", ", s$state) else ""), x = 0.04)
+    put(sprintf("%-24s %s / %s / %s", "ICAO / WBAN / USAF", station_code, s$wban, s$usaf), x = 0.04)
+    put(sprintf("%-24s USW000%s", "GHCNh station ID", s$wban), x = 0.04)
+    put(sprintf("%-24s %.4f N, %.4f W", "Latitude, longitude", s$lat, abs(s$lon)), x = 0.04)
+    put(sprintf("%-24s %.1f m MSL", "Elevation", s$elev_m), x = 0.04)
+  }
+  put(sprintf("%-24s %.1f m        Temperature reference height: %.1f m",
+              "Wind reference height", refh$wind, refh$temp), x = 0.04)
+  gap()
+  put("Upper air station", bold = TRUE)
+  if (!is.null(meta) && !is.na(meta$u$igra_id)) {
+    u <- meta$u
+    put(sprintf("%-24s %s  %s", "Station", u$igra_id, trimws(u$station_name)), x = 0.04)
+    put(sprintf("%-24s %.4f N, %.4f W        Elevation: %.1f m MSL",
+                "Latitude, longitude", u$lat, abs(u$lon), u$elev_m), x = 0.04)
+    if (!is.na(meta$s$lat))
+      put(sprintf("%-24s %.0f km %s of %s", "Separation",
+                  gc_km(meta$s$lat, meta$s$lon, u$lat, u$lon),
+                  gc_dir(meta$s$lat, meta$s$lon, u$lat, u$lon), station_code), x = 0.04)
+  }
+  gap()
+  put("Processing", bold = TRUE)
+  put(sprintf("%-24s AERMET %s  |  AERMINUTE %s  |  AERSURFACE %s (NLCD %s)",
+              "Software", AERMET_VERSION, AERMET_VERSION,
+              if (!is.null(aers)) aers$version else "26135",
+              if (!is.null(aers)) aers$nlcd else "2021"), x = 0.04)
+  put(sprintf("%-24s NCEI GHCNh hourly (replaces the discontinued ISHD)",
+              "Surface observations"), x = 0.04)
+  put(sprintf("%-24s NCEI ASOS 1-minute and 5-minute, hourly-averaged by AERMINUTE",
+              "Winds"), x = 0.04)
+  put(sprintf("%-24s NCEI IGRA v2 radiosonde soundings", "Upper air"), x = 0.04)
+  if (!is.null(qcs))
+    put(sprintf("%-24s %s observations screened; %s suspect/erroneous and %s METAR-mismatch rejected",
+                "GHCNh quality control", fmt_int(qcs$records), fmt_int(qcs$flagged),
+                fmt_int(qcs$metar)), x = 0.04)
+  put(sprintf("%-24s %s", "Report generated", format(Sys.Date())), x = 0.04)
+  gap()
+  put("Files in this dataset", bold = TRUE)
+  put(sprintf("%-24s AERMOD surface and profile files, processed WITHOUT ADJ_U*",
+              sprintf("%s<yyyy>.sfc / .pfl", station_code)), x = 0.04)
+  put(sprintf("%-24s the same period processed with METHOD STABLEBL ADJ_U*",
+              sprintf("%s<yyyy>US.sfc / .pfl", station_code)), x = 0.04)
+  gap(0.3)
+  put("The .sfc file carries the hourly boundary-layer parameters and the .pfl carries the wind and", x = 0.04, cex = 0.75)
+  put("temperature profile at the measurement heights; AERMOD requires both.  Use the regular set or", x = 0.04, cex = 0.75)
+  put("the ADJ_U* set consistently -- do not mix them within a single AERMOD run.  ADJ_U* is the", x = 0.04, cex = 0.75)
+  put("EPA-approved treatment for low-wind stable hours and generally lowers modelled concentrations;", x = 0.04, cex = 0.75)
+  put("its use should be stated and justified in the modelling protocol.", x = 0.04, cex = 0.75)
+  gap(0.3)
+  put("Each yearly .sfc ends with the 24 hours of 1 January of the FOLLOWING year.  That is how AERMET", x = 0.04, cex = 0.75)
+  put("writes the file for XDATES y/01/01 TO y+1/01/01 and is expected by AERMOD -- it is not duplicated", x = 0.04, cex = 0.75)
+  put("data within the year.", x = 0.04, cex = 0.75)
+
+  ## ---- Page 2: summary ----
   par(mar = c(1, 1, 2, 1))
   plot.new(); title(main = sprintf("AERMET Meteorological Data Report -- %s (%d-%d)",
                                    station_code, start_year, end_year))
-  yy <- 0.94; lh <- 0.031
-  put <- function(txt, x = 0.02, bold = FALSE, col = "black") {
-    text(x, yy, txt, adj = 0, cex = 0.8, font = if (bold) 2 else 1, col = col)
-    yy <<- yy - lh
-  }
+  yy <- 0.94
   put(sprintf("Generated %s  |  AERMET %s + AERMINUTE 26135 + AERSURFACE 26135 (NLCD 2021)",
               format(Sys.Date()), AERMET_VERSION), col = "grey25")
   put("Surface data: NCEI GHCNh (replaces discontinued ISHD)  |  Upper air: IGRA soundings  |  Winds: 1-min ASOS (AERMINUTE)",
@@ -1021,9 +1564,18 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
                   100 * (mean(m$ustar_adj / m$ustar_reg) - 1),
                   median(m$ustar_reg), median(m$ustar_adj)), x = 0.04)
   }
-  put(sprintf("- Surface characteristics: AERSURFACE 26135, NLCD 2021, 1-km sectors; z0 range %.3f-%.3f m across sectors/months.",
+  put(sprintf("- Surface characteristics: AERSURFACE %s, NLCD %s, %s m radius, %s sector(s); z0 %.3f-%.3f m. Full table follows.",
+              if (!is.null(aers)) aers$version else "26135",
+              if (!is.null(aers)) aers$nlcd else "2021",
+              if (!is.null(aers)) trimws(aers$zo_radius) else "1000",
+              if (!is.null(aers) && !is.null(aers$sectors)) nrow(aers$sectors) else "?",
               min(d$z0, na.rm = TRUE), max(d$z0, na.rm = TRUE)), x = 0.04)
   put("- Wind roses use direction FROM which the wind blows; petals are % of all valid hours.", x = 0.04)
+  cm <- sum(d$calm, na.rm = TRUE); ms <- sum(is.na(d$ws))
+  put(sprintf("- AERMOD excludes calm and missing hours from the averaging period: %s calm and %s missing hours over %d-%d",
+              fmt_int(cm), fmt_int(ms), start_year, end_year), x = 0.04)
+  put(sprintf("  (%.1f%% of the record). AERMOD reports both counts in its own output; no substitution is made here.",
+              100 * (cm + ms) / max(1, nrow(d))), x = 0.04)
 
   ## ---- Page 2: 5-year wind rose ----
   par(mar = c(4, 2, 5, 2))
@@ -1172,8 +1724,90 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
   mtext(sprintf("Moisture & Cloud Cover -- %s, %d-%d",
                 station_code, start_year, end_year), outer = TRUE, cex = 1.1, font = 2)
 
-  ## ---- Page 9: completeness heatmap ----
-  par(mfrow = c(1, 1), mar = c(4, 5, 4, 6))
+  ## ---- Page 9: AERSURFACE surface characteristics ----
+  new_text_page(sprintf("Surface Characteristics -- %s (AERSURFACE %s)", station_code,
+                        if (!is.null(aers)) aers$version else "26135"))
+  if (!is.null(aers)) {
+    put("Run settings", bold = TRUE)
+    put(sprintf("%-26s NLCD %s land cover, with impervious and canopy",
+                "Land cover", aers$nlcd), x = 0.04)
+    put(sprintf("%-26s %s, %s m radius, monthly resolution",
+                "Roughness method", aers$zo_method, trimws(aers$zo_radius)), x = 0.04)
+    put(sprintf("%-26s %.6f, %.6f  (%s)", "Site centre", aers$lat, aers$lon, aers$datum), x = 0.04)
+    put(sprintf("%-26s %s", "Surface moisture", aers$moisture), x = 0.04)
+    put(sprintf("%-26s %s", "Continuous snow cover", aers$snow), x = 0.04)
+    put(sprintf("%-26s %s", "Non-airport sectors", aers$highz0), x = 0.04)
+    if (!is.null(aers$sectors)) {
+      put(sprintf("%-26s %d", "Sectors", nrow(aers$sectors)), x = 0.04)
+      for (i in seq_len(nrow(aers$sectors)))
+        put(sprintf("%-26s sector %d: %5.1f to %6.1f degrees", "",
+                    aers$sectors$id[i], aers$sectors$start[i], aers$sectors$end[i]), x = 0.04)
+    }
+    gap()
+    put("Monthly values applied by AERMET", bold = TRUE)
+    if (!is.null(aers$table)) {
+      t <- aers$table
+      nsec <- length(unique(t$sector))
+      # months down the page, one block of three columns per sector
+      hdrline <- paste0(sprintf("%-6s", "Month"),
+        paste(sapply(sort(unique(t$sector)), function(k)
+          sprintf("  %8s %8s %8s", sprintf("S%d alb", k), sprintf("S%d Bo", k),
+                  sprintf("S%d z0", k))), collapse = ""))
+      put(hdrline, x = 0.04, bold = TRUE, cex = 0.72)
+      for (m in 1:12) {
+        row <- sprintf("%-6s", month.abb[m])
+        for (k in sort(unique(t$sector))) {
+          r <- t[t$month == m & t$sector == k, ]
+          row <- paste0(row, if (nrow(r))
+            sprintf("  %8.2f %8.2f %8.3f", r$albedo[1], r$bowen[1], r$z0[1])
+            else sprintf("  %8s %8s %8s", "-", "-", "-"))
+        }
+        put(row, x = 0.04, cex = 0.72)
+      }
+      gap(0.4)
+      put("alb = albedo, Bo = Bowen ratio, z0 = surface roughness length (m). These are the values", x = 0.04, cex = 0.72)
+      put("AERMET applied; they are reproduced from the AERSURFACE output supplied with this dataset.", x = 0.04, cex = 0.72)
+    }
+  } else put("AERSURFACE output file not found in the station folder.", x = 0.04)
+
+  ## ---- Page 10: data quality screening ----
+  new_text_page(sprintf("Data Quality Screening -- %s (%d-%d)",
+                        station_code, start_year, end_year))
+  put("Surface data quality control applied before processing", bold = TRUE)
+  put("NCEI flags every observation with a quality code that AERMET does not act on, so the GHCNh", x = 0.04, cex = 0.78)
+  put("file is screened first. Rejected values are blanked and treated as missing; no record is dropped", x = 0.04, cex = 0.78)
+  put("and no value is altered or substituted. A second screen compares the decoded wind speed against", x = 0.04, cex = 0.78)
+  put("the verbatim METAR text NCEI carries alongside it, which catches decoding errors the quality", x = 0.04, cex = 0.78)
+  put("flags miss.", x = 0.04, cex = 0.78)
+  gap(0.4)
+  if (!is.null(qcs)) {
+    put(sprintf("%-40s %s", "Observations screened", fmt_int(qcs$records)), x = 0.04)
+    put(sprintf("%-40s %s", "Rejected: NCEI suspect or erroneous", fmt_int(qcs$flagged)), x = 0.04)
+    put(sprintf("%-40s %s", "Rejected: decoded wind vs METAR text", fmt_int(qcs$metar)), x = 0.04)
+    put(sprintf("%-40s %s", "Itemised log", qcs$file), x = 0.04)
+  } else put("No quality-control log found for this station.", x = 0.04)
+  gap()
+  put("Physical plausibility of the delivered files", bold = TRUE)
+  put("Screening of the .sfc files as delivered. A non-zero count is not by itself an error, but each", x = 0.04, cex = 0.78)
+  put("occurrence should be explainable before the data are used.", x = 0.04, cex = 0.78)
+  gap(0.4)
+  put(sprintf("%-6s %11s %10s %10s %14s %18s", "Year", "Max wind", "Min temp",
+              "Max temp", "Hrs ws>25 m/s", "Hrs T out of range"),
+      x = 0.04, bold = TRUE, cex = 0.78)
+  ext <- screen_sfc_extremes(station_dir, station_code, years)
+  for (y in years) {
+    e <- ext[[as.character(y)]]
+    if (is.null(e)) next
+    put(sprintf("%-6d %7.1f m/s %8.1f C %8.1f C %14d %18d",
+                y, e$ws_max, e$t_min, e$t_max, e$n_ws_hi, e$n_t_out),
+        x = 0.04, cex = 0.78,
+        col = if (e$n_ws_hi + e$n_t_out > 0) "#b2182b" else "black")
+  }
+  gap(0.4)
+  put("Bounds used: wind speed above 25 m/s, temperature outside -25 to +45 C.", x = 0.04, cex = 0.72)
+
+  ## ---- Page 11: completeness heatmap (monthly diagnostic) ----
+  par(mfrow = c(1, 1), mar = c(4, 5, 4, 8))
   compmat <- matrix(NA, length(years), 12,
                     dimnames = list(years, month.abb))
   for (yi in seq_along(years)) for (m in 1:12) {
@@ -1186,15 +1820,32 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
   cols <- colorRampPalette(c("#b2182b", "#fddbc7", "#d1e5f0", "#2166ac"))(50)
   image(1:12, seq_along(years), t(compmat[rev(seq_along(years)), , drop = FALSE]),
         col = cols, zlim = c(50, 100), axes = FALSE, xlab = "", ylab = "",
-        main = sprintf("Data completeness by month (%% of hours with valid wind & temp)"))
+        main = "Monthly data completeness (% of hours with valid wind and temperature)")
   axis(1, 1:12, month.abb, cex.axis = 0.85)
   axis(2, seq_along(years), rev(years), las = 1)
   for (yi in seq_along(years)) for (m in 1:12)
     if (!is.na(compmat[yi, m]))
       text(m, length(years) - yi + 1, sprintf("%.0f", compmat[yi, m]), cex = 0.7,
            col = if (compmat[yi, m] < 90) "#67001f" else "grey25")
+  # quarter boundaries and the quarterly figures that are the actual EPA test
+  abline(v = c(3.5, 6.5, 9.5), col = "grey35", lwd = 1.6)
+  for (qi in seq_along(qn <- c("Q1","Q2","Q3","Q4")))
+    mtext(qn[qi], side = 3, line = 0.2, at = qi * 3 - 1, cex = 0.75, col = "grey30")
+  for (yi in seq_along(years)) {
+    yd <- completeness[[as.character(years[yi])]]
+    if (is.null(yd) || !is.null(yd$error)) next
+    lab <- paste(sapply(qn, function(q) {
+      qd <- yd$quarters[[q]]
+      if (is.null(qd$completeness_pct)) "n/a" else sprintf("%.1f", qd$completeness_pct)
+    }), collapse = " / ")
+    ok <- all(sapply(qn, function(q) isTRUE(yd$quarters[[q]]$meets_epa)))
+    mtext(lab, side = 4, line = 0.4, at = length(years) - yi + 1, las = 1,
+          cex = 0.62, col = if (ok) "grey25" else "#b2182b")
+  }
+  mtext("Quarterly (EPA test)", side = 4, line = 0.4, at = length(years) + 0.75,
+        las = 1, cex = 0.62, font = 2, col = "grey20")
   box()
-  hdr("months below 90% shown in red text")
+  hdr("monthly detail is diagnostic -- the EPA 90% criterion is applied by QUARTER (values at right)")
 
   cat(sprintf("Met report PDF: %s\n", basename(pdf_path)))
   pdf_path
@@ -1259,6 +1910,8 @@ process_weather_station <- function(station_code, station_id, start_year, end_ye
 
   wban <- sub(".*-", "", station_id)
   ghcnh_file <- download_ghcnh(station_code, wban, start_year, end_year, base_directory)
+  # AERMET does not honour NCEI's quality flags; screen the .psv before it is read.
+  filter_ghcnh_quality(ghcnh_file)
 
   has_aerminute <- check_aerminute_availability(station_code, start_year, 1)
   cat(sprintf("%s %s AERMINUTE data\n", station_code,

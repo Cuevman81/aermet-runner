@@ -179,6 +179,39 @@ qa_aermet <- function(station_dir, icao, y1, y2) {
       else sprintf("%d/%d years used them (%s hourly obs)", got, length(years),
                    paste(vapply(a1, fmt_int, character(1)), collapse = "/")))))
   }
+
+  # 7) the GHCNh quality screen ran.
+  # AERMET does not act on NCEI's per-element quality flags, so suspect and erroneous
+  # observations otherwise reach the .sfc verbatim. Confirm the screen was applied and
+  # report what it removed.
+  qcl <- list.files(station_dir, pattern = "_qc_log\\.txt$", full.names = TRUE)
+  if (length(qcl)) {
+    lg  <- readLines(qcl[1], warn = FALSE)
+    num <- function(p) {
+      h <- grep(p, lg, value = TRUE)
+      if (!length(h)) return(NA_integer_)
+      suppressWarnings(as.integer(sub("^\\D*?(\\d+).*$", "\\1", sub(p, "", h[1]))))
+    }
+    chk <- c(chk, list(.qa_chk(grp, "GHCNh quality screening applied", "pass",
+      sprintf("%s obs screened; %s suspect/erroneous and %s METAR-mismatch rejected",
+              fmt_int(num("Records scanned\\s*:")),
+              fmt_int(num("Screen 1 \\(NCEI flags\\)\\s*:")),
+              fmt_int(num("Screen 2 \\(METAR check\\)\\s*:"))))))
+  } else {
+    chk <- c(chk, list(.qa_chk(grp, "GHCNh quality screening applied", "warn",
+      "no quality-control log found -- suspect NCEI observations may have been used")))
+  }
+
+  # 8) nothing physically implausible survived into the delivered files.
+  ext <- tryCatch(screen_sfc_extremes(station_dir, icao, years), error = function(e) NULL)
+  if (!is.null(ext) && length(ext)) {
+    nbad <- sum(vapply(ext, function(e) as.integer(e$n_ws_hi + e$n_t_out), integer(1)))
+    wmax <- suppressWarnings(max(vapply(ext, function(e) e$ws_max, numeric(1)), na.rm = TRUE))
+    chk <- c(chk, list(.qa_chk(grp, "Delivered .sfc physically plausible",
+      if (nbad == 0) "pass" else "warn",
+      sprintf("max wind %.1f m/s; %d hour(s) outside plausible bounds (ws>25 m/s, T outside -25..45 C)",
+              wmax, nbad))))
+  }
   chk
 }
 
