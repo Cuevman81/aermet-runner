@@ -22,9 +22,10 @@
 .qa_chk <- function(group, label, status, detail = "")
   list(group = group, label = label, status = status, detail = detail)
 
-# Robustly read the AERMET .RP2 MESSAGE SUMMARY error/warning counts. (The engine's
-# parse_rp2_file anchors on a trailing digit and returns NA for the "<n> MESSAGES"
-# layout, so QA must not rely on it for the pass/fail error check.)
+# Read the AERMET .RP2 MESSAGE SUMMARY error/warning counts directly. The engine's
+# own parse_rp2_file used to return NA for the "<n> MESSAGES" layout (corrected in
+# engine_fixes.R); QA keeps its own reader so the error pass/fail check stays
+# independent of that wrapper and cannot silently regress to a false PASS.
 .qa_rp2_counts <- function(rp2) {
   if (!file.exists(rp2)) return(c(error = NA_real_, warning = NA_real_))
   ln <- readLines(rp2, warn = FALSE)
@@ -67,6 +68,9 @@ qa_aersurface <- function(aers_dir, icao) {
     sprintf("reported %s", ver %||% "unknown"))))
 
   # 3) surface-characteristics table complete & physically plausible
+  # AERSURFACE row layout is:  SITE_CHAR <month> <sector> <albedo> <Bowen> <z0>
+  # so dropping the keyword leaves f = [month, sector, albedo, Bowen, z0] and the
+  # three values of interest are f[3:5] in THAT order (albedo first, z0 last).
   sc <- grep("^\\s*SITE_CHAR", ln, value = TRUE)
   nsect <- length(grep("^\\s*SECTOR\\s", ln))
   vals <- do.call(rbind, lapply(sc, function(l) {
@@ -81,7 +85,7 @@ qa_aersurface <- function(aers_dir, icao) {
     sprintf("%d/%d monthly rows across %d sector(s); %s", length(sc), exp_rows,
             max(nsect, 1),
             if (!is.null(vals) && all(is.finite(vals)))
-              sprintf("z0 %.3f-%.3f, Bowen %.2f-%.2f, albedo %.3f-%.3f",
+              sprintf("albedo %.3f-%.3f, Bowen %.2f-%.2f, z0 %.3f-%.3f m",
                       min(vals[,1]), max(vals[,1]), min(vals[,2]), max(vals[,2]),
                       min(vals[,3]), max(vals[,3]))
             else "non-finite values present"))))
@@ -154,6 +158,23 @@ qa_aermet <- function(station_dir, icao, y1, y2) {
   chk
 }
 
+# Calendar hours in a year (AERMET writes one .sfc record per hour).
+.qa_expected_hours <- function(year) {
+  leap <- (year %% 4 == 0 && year %% 100 != 0) || year %% 400 == 0
+  24L * (365L + as.integer(leap))
+}
+
+# Hourly records the .sfc actually carries FOR that year. (Each yearly file also
+# ends with 1 January of the next year -- deliberate; those are not counted here.)
+.qa_sfc_year_records <- function(sfc, year) {
+  if (!file.exists(sfc)) return(NA_integer_)
+  ln <- readLines(sfc, warn = FALSE)
+  ln <- ln[grep("^\\s*\\d{2,4}\\s+\\d{1,2}\\s+\\d{1,2}", ln)]
+  if (!length(ln)) return(NA_integer_)
+  yy <- suppressWarnings(as.numeric(sub("^\\s*(\\d+).*", "\\1", ln)))
+  sum(vapply(yy, function(v) isTRUE(year_matches(v, year)), logical(1)))
+}
+
 # --- Completeness (EPA 90% per quarter) ---------------------------------------
 qa_completeness <- function(station_dir, icao, y1, y2) {
   grp <- "Data completeness (EPA target 90%/quarter)"
@@ -166,6 +187,19 @@ qa_completeness <- function(station_dir, icao, y1, y2) {
                                  yd$error %||% "no data")))
       next
     }
+
+    # The percentages below are computed over records PRESENT in the .sfc, so a
+    # block of hours AERMET never wrote would not lower them. Check the record
+    # count against the calendar year so a wholesale gap cannot read as 100%.
+    yi    <- as.integer(y)
+    nrec  <- .qa_sfc_year_records(file.path(station_dir, sprintf("%s%d.sfc", icao, yi)), yi)
+    exp_h <- .qa_expected_hours(yi)
+    chk <- c(chk, list(.qa_chk(grp, sprintf("%s — every calendar hour written", y),
+      if (is.na(nrec)) "warn" else if (nrec == exp_h) "pass" else "fail",
+      if (is.na(nrec)) "could not read .sfc"
+      else sprintf("%d of %d hourly records%s", nrec, exp_h,
+                   if (nrec == exp_h) "" else sprintf(" — %d hour(s) absent from the file",
+                                                      exp_h - nrec)))))
     ann <- yd$annual$completeness_pct %||% NA
     qtxt <- paste(vapply(names(yd$quarters), function(q) {
       qd <- yd$quarters[[q]]

@@ -18,6 +18,9 @@ source(file.path(APP_ROOT, "backend", "aersurface_runner.R"))
 AERMET_SOURCE_ONLY <- TRUE
 source(file.path(APP_ROOT, "backend", "engine.R"))
 
+# Corrections wrapped around the bundled engine -- must come AFTER engine.R.
+source(file.path(APP_ROOT, "backend", "engine_fixes.R"))
+
 # Post-run QA (reuses the engine's verify_* helpers) -- must come AFTER engine.R.
 source(file.path(APP_ROOT, "backend", "qa.R"))
 

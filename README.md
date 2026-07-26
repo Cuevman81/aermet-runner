@@ -36,7 +36,8 @@ the station resolution and the on-demand AERSURFACE step are added on top.
 
 ## Versions
 
-The bundled processing engine is the **current EPA release as of July 9, 2026**:
+The bundled processing engine is the **current EPA release** — posted to SCRAM on
+**07-09-2026**, re-verified as still current on **2026-07-26**:
 
 | Component | Version | Notes |
 |-----------|---------|-------|
@@ -47,15 +48,22 @@ The bundled processing engine is the **current EPA release as of July 9, 2026**:
 | R | **4.1+** | required |
 
 EPA stamps the AERMOD suite with a Julian build number `YYDDD`, so **26135** is the
-2026 build, day 135 (mid-May 2026) — the newest AERMET / AERMINUTE / AERSURFACE on
-EPA SCRAM at the time of writing. The app also shows these versions live at the top
-of its window and in the run footer, and AERMET's version is re-checked from the
-output header during the QA pass.
+2026 build, day 135 — posted to EPA SCRAM on **07-09-2026**. The app also shows these
+versions live at the top of its window and in the run footer, and both AERMET's and
+AERSURFACE's versions are re-checked from their own output headers during the QA pass,
+so a mismatched binary is caught rather than assumed.
+
+**Re-verified against EPA SCRAM on 2026-07-26** — 26135 is still the current release
+for all three tools; no update needed.
 
 When EPA posts a newer build, update it in place: replace the executables in `bin/`
-(keeping the same file names) and bump `ENGINE_VERSION` in `app.R`. Authoritative
-downloads: EPA SCRAM —
-<https://www.epa.gov/scram/air-quality-dispersion-modeling-preferred-and-recommended-models>.
+(keeping the same file names) and bump `ENGINE_VERSION` / `ENGINE_ASOF` in `app.R`.
+Authoritative downloads on EPA SCRAM:
+
+- AERMET and AERMINUTE —
+  <https://www.epa.gov/scram/meteorological-processors-and-accessory-programs>
+- AERSURFACE (listed under *related* model support programs, not the met page) —
+  <https://www.epa.gov/scram/air-quality-dispersion-modeling-related-model-support-programs>
 
 ---
 
@@ -183,18 +191,54 @@ and an expandable checklist (auto-expanded when it isn't a clean PASS):
 
 - **AERSURFACE** — finished cleanly (no interactive-prompt hang), version 26135,
   and a complete, physically plausible surface-characteristics table (12 monthly
-  rows per sector; roughness / Bowen / albedo in range), plus the AP/NONAP sectors.
+  rows per sector, reported in the file's own column order — albedo, Bowen ratio,
+  surface roughness z0 — each range-checked), plus the AP/NONAP sectors used.
 - **AERMET** — engine version 26135, every Stage-2 run finished successfully
   (regular + ADJ_U*), **zero error messages** in the `.RP2` summaries, all
   `.sfc`/`.pfl` output files present, non-empty and stamped with the right year,
   and confirmation that upper-air and surface observations were actually ingested.
 - **Data completeness** — each year's annual and per-quarter percentages against
   the EPA 90%-per-quarter target (a quarter below 90% is a **WARN**, i.e. a data-
-  availability note, not a processing error).
+  availability note, not a processing error), plus a check that the `.sfc` actually
+  carries **every calendar hour** of the year. That second check matters because the
+  percentages are computed over the records present in the file, so a block of hours
+  the engine never wrote would otherwise not show up as missing.
 
 The same checklist is written to `<ICAO>_QA_SUMMARY.txt` and folded into the
 delivered zip. Meaning of the states: **PASS** = check met; **WARN** = review
 (usually data availability); **FAIL** = do not use until resolved.
+
+### Accuracy corrections (2026-07-26 QA sweep)
+
+A full audit of the data flow — station resolution, NLCD fetch, AERSURFACE, AERMET,
+QA and the report outputs — produced these fixes. If you generated datasets with an
+earlier build, the AERMOD-ready `.sfc` / `.pfl` files themselves are **unaffected**;
+only the QA panel and the two report documents were wrong.
+
+- **QA panel reported albedo as roughness and vice-versa.** AERSURFACE writes
+  `SITE_CHAR <month> <sector> <albedo> <Bowen> <z0>`; the panel had the first and
+  last labels swapped. Values were always correct in the `.sfc` — only the QA
+  label was misleading. Fixed in `backend/qa.R`.
+- **Verification report printed `Errors: NA | Warnings: NA` and `T subs: NA`.** The
+  engine's `.RP2` parser anchored on a line ending in digits, but AERMET writes
+  `ERROR MESSAGES        0 MESSAGES`; its planetary-boundary-layer scan also stopped
+  one line short of the temperature-substitution count. Both now report real numbers.
+- **Met report PDF double-counted 1 January.** Each yearly `.sfc` deliberately ends
+  with the 24 hours of 1 January of the following year (this matches EPA/MDEQ
+  production output and is *not* changed). The report stacked the yearly files
+  without de-duplicating, so every year after the first counted that day twice —
+  KBHM 2024 showed 8802 "valid hrs" against a 8784-hour year. Now de-duplicated.
+- **Batch runs leaked the sectors override.** A manual sectors entry describes one
+  airport's geometry, but it was being applied to every station in an *Also process*
+  batch. It now applies only to the selected station; the others auto-derive.
+- **Auto surface moisture could be dragged toward DRY** by a year with an incomplete
+  precipitation record (a short year totals low for a reporting reason, not a
+  climatic one). Incomplete years are excluded from the period mean and named in the
+  run log.
+
+These corrections live in `backend/engine_fixes.R`, which wraps the bundled engine
+rather than editing it, so `backend/engine.R` stays a verbatim copy of the MDEQ
+production `AERMET.R` and can still be re-synced wholesale.
 
 ## AERSURFACE options
 
@@ -255,6 +299,12 @@ surface characteristics match the regional-tile workflow byte-for-byte.
   several minutes; the app is single-user and processes synchronously.
 - Upper-air pairing uses the **nearest active** IGRA site — in radiosonde-sparse
   regions that can be a few hundred km; confirm it suits your application.
+- **Check upper-air availability for your window.** Pairing picks the nearest site
+  that is still active; it does not verify that site flew soundings across every
+  year you asked for. Individual NWS sites do suspend launches for months at a time,
+  and a gap shows up in the QA panel as a low upper-air observation count rather than
+  as an error. If you see one, either substitute a nearby sounding site or use
+  AERMET 26135's secondary upper-air substitution.
 - NLCD is the 2021 CONUS release. AK/HI/PR use different NLCD/datum handling and
   are not yet wired in.
 

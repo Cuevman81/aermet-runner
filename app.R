@@ -23,9 +23,9 @@ DEFAULT_OUTPUT <- file.path(APP_ROOT, "runs")
 CUR_YEAR <- as.integer(format(Sys.Date(), "%Y"))
 
 # --- App / engine metadata (update these when the bundled EPA binaries change) --
-APP_VERSION    <- "1.0"
-ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE
-ENGINE_ASOF    <- "July 9, 2026"   # date the bundled EPA versions were confirmed current
+APP_VERSION    <- "1.1"
+ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE (posted 07-09-2026)
+ENGINE_ASOF    <- "July 26, 2026"  # date the bundled EPA versions were last verified current on SCRAM
 NLCD_YEAR      <- 2021             # NLCD product used by AERSURFACE
 CONTACT_NAME   <- "Rodney Cuevas"
 CONTACT_TITLE  <- "Branch Manager, Air Quality Management Branch"
@@ -222,19 +222,30 @@ server <- function(input, output, session) {
     if (is.na(y1) || is.na(y2) || y2 < y1 || y2 > CUR_YEAR) {
       addlog("Invalid year range."); return()
     }
-    icaos <- unique(c(toupper(input$station), parse_icaos(input$stations_extra)))
+    primary <- toupper(input$station)
+    icaos <- unique(c(primary, parse_icaos(input$stations_extra)))
     icaos <- icaos[nzchar(icaos)]
     results(NULL)
-    opts <- list(moisture = input$moisture, snow = isTRUE(input$snow),
-                 arid = isTRUE(input$arid), airport = isTRUE(input$airport),
-                 sectors = parse_sectors(input$sectors))
+    base_opts <- list(moisture = input$moisture, snow = isTRUE(input$snow),
+                      arid = isTRUE(input$arid), airport = isTRUE(input$airport))
+    # A sectors override describes ONE airport's geometry, so it applies only to the
+    # station it was entered for; the rest of a batch auto-derive from their own runways.
+    sec_override <- parse_sectors(input$sectors)
     addlog(sprintf("=== Building %d station(s): %s  |  %d-%d ===",
                    length(icaos), paste(icaos, collapse = ", "), y1, y2))
+    if (y2 - y1 + 1 > 5)
+      addlog(sprintf("NOTE: %d-year window requested; EPA guidance is 5 years of NWS data.",
+                     y2 - y1 + 1))
+    if (!is.null(sec_override) && length(icaos) > 1)
+      addlog(sprintf("NOTE: sectors override applies to %s only; %s auto-derive from runway geometry.",
+                     primary, paste(setdiff(icaos, primary), collapse = ", ")))
 
     collected <- list(); n <- length(icaos)
     withProgress(message = "Building met data", value = 0, {
       for (k in seq_len(n)) {
         ic <- icaos[k]
+        opts <- base_opts
+        if (identical(ic, primary)) opts$sectors <- sec_override
         addlog(sprintf("--- [%d/%d] %s ---", k, n, ic))
         cb <- function(msg, frac) {
           setProgress(value = max(0, min(1, (k - 1 + frac) / n)),

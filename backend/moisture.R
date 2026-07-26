@@ -60,11 +60,24 @@ classify_moisture <- function(years, ghcn_id, cache_dir, climo_n = 30) {
 
   # single representative value for the (single) AERSURFACE run: classify the
   # period-mean annual precip against the climatological 30/70 thresholds.
-  mean_p <- mean(per_year$precip_in, na.rm = TRUE)
+  #
+  # Only years with an essentially complete daily record may enter that mean: a
+  # year missing months totals low for a reporting reason, not a climatic one, and
+  # would drag the period toward DRY. Fall back to whatever exists if none qualify.
+  have    <- per_year[!is.na(per_year$precip_in), ]
+  usable  <- have[have$ndays >= 350, ]
+  partial <- have$year[have$ndays < 350]
+  if (nrow(usable) == 0) usable <- have
+  mean_p  <- if (nrow(usable)) mean(usable$precip_in, na.rm = TRUE) else NA_real_
   overall <- cls(mean_p); if (is.na(overall)) overall <- "AVERAGE"
+
+  note <- sprintf("30-yr climatology %d-%d: dry<=%.1f in, wet>=%.1f in",
+                  min(climo$year), max(climo$year), q30, q70)
+  if (length(partial))
+    note <- sprintf("%s; incomplete precip record excluded for %s", note,
+                    paste(partial, collapse = ", "))
 
   list(overall = overall, per_year = per_year, q30 = round(q30, 1), q70 = round(q70, 1),
        climo_years = range(climo$year), mean_p = round(mean_p, 1), ok = TRUE,
-       note = sprintf("30-yr climatology %d-%d: dry<=%.1f in, wet>=%.1f in",
-                      min(climo$year), max(climo$year), q30, q70))
+       partial_years = partial, note = note)
 }
