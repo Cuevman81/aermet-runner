@@ -214,6 +214,13 @@ The same checklist is written to `<ICAO>_QA_SUMMARY.txt` and folded into the
 delivered zip. Meaning of the states: **PASS** = check met; **WARN** = review
 (usually data availability); **FAIL** = do not use until resolved.
 
+> **If you built met data with a version before v1.2, check your station's WBAN.**
+> Any station whose 5-digit WBAN starts with a zero (e.g. KJAN 03940, KTVR 03996)
+> had its 1-minute ASOS winds silently discarded — the run reported success but fell
+> back to standard hourly winds, which inflates calm hours several-fold. Re-run those
+> stations; the QA panel now fails the build if it happens. Stations whose WBAN has no
+> leading zero were never affected.
+
 ### Accuracy corrections (2026-07-26 QA sweep)
 
 A full audit of the data flow — station resolution, NLCD fetch, AERSURFACE, AERMET,

@@ -23,7 +23,7 @@ DEFAULT_OUTPUT <- file.path(APP_ROOT, "runs")
 CUR_YEAR <- as.integer(format(Sys.Date(), "%Y"))
 
 # --- App / engine metadata (update these when the bundled EPA binaries change) --
-APP_VERSION    <- "1.1"
+APP_VERSION    <- "1.2"
 ENGINE_VERSION <- "26135"          # EPA AERMET / AERMINUTE / AERSURFACE (posted 07-09-2026)
 ENGINE_ASOF    <- "July 26, 2026"  # date the bundled EPA versions were last verified current on SCRAM
 NLCD_YEAR      <- 2021             # NLCD product used by AERSURFACE
