@@ -1069,18 +1069,34 @@ generate_verification_report <- function(results, station_code, start_year, end_
     if (is.null(s) || is.null(s$error_count) || is.na(s$error_count)) 0L
     else as.integer(s$error_count), integer(1)))
   n_phys <- sum(vapply(ext, function(e) as.integer(e$n_ws_hi + e$n_t_out), integer(1)))
-  verdict <- if (q_fail == 0 && n_err == 0 && n_phys == 0) "PASS" else
-             if (q_fail > 0 || n_err > 0) "FAIL" else "PASS WITH NOTES"
+  # Processing quality and data completeness are different things and must not be
+  # collapsed into one verdict.  A quarter below 90% is a gap in NCEI's observation
+  # archive, not a processing failure -- reporting it as "FAIL" would wrongly imply
+  # the data were produced incorrectly and would obscure a genuine processing fault
+  # if one ever occurred.
+  proc_ok <- (n_err == 0 && n_phys == 0)
+  verdict <- if (!proc_ok) "PROCESSING FAULT -- REVIEW REQUIRED"
+             else if (q_fail == 0) "PROCESSED SUCCESSFULLY -- ALL QUARTERS MEET THE EPA CRITERION"
+             else "PROCESSED SUCCESSFULLY -- SOME QUARTERS BELOW THE EPA CRITERION"
 
   nm <- if (!is.null(meta) && !is.na(meta$s$station_name)) meta$s$station_name else station_code
   rc <- c(rule(), sprintf("AERMET PROCESSING VERIFICATION REPORT -- %s (%s)", station_code, nm),
           sprintf("Period %d-%d   |   Generated %s", start_year, end_year,
                   format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
           rule(), "",
-          sprintf("OVERALL RESULT: %s", verdict),
-          sprintf("   Quarters meeting the EPA 90%% criterion : %d of %d", q_tot - q_fail, q_tot),
-          sprintf("   AERMET processing errors               : %d", n_err),
-          sprintf("   Non-physical values in delivered .sfc   : %d", n_phys), "")
+          sprintf("OVERALL RESULT: %s", verdict), "",
+          sprintf("   Processing              %s", if (proc_ok) "PASS" else "REVIEW"),
+          sprintf("      AERMET errors                    : %d", n_err),
+          sprintf("      Non-physical values in .sfc      : %d", n_phys),
+          sprintf("   Data completeness       %s", if (q_fail == 0) "PASS" else "SEE NOTE"),
+          sprintf("      Quarters meeting EPA 90%% criterion: %d of %d", q_tot - q_fail, q_tot))
+  if (q_fail > 0)
+    rc <- c(rc, "",
+      sprintf("   Note: %d quarter(s) fall below the 90%% criterion.  This reflects gaps in", q_fail),
+      "   the source observation archive, not an error in processing.  Review those",
+      "   periods when selecting a station and period for a regulatory application and",
+      "   consider substitute years, consistent with Appendix W and regional guidance.")
+  rc <- c(rc, "")
 
   # ---- 1. station ----
   rc <- c(rc, rule("-"), "1. STATION", rule("-"))
