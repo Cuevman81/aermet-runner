@@ -2,9 +2,16 @@
 # engine_fixes.R -- corrections layered on top of the bundled engine (engine.R).
 #
 # engine.R is a verbatim copy of the MDEQ AERMET.R production script so it can be
-# re-synced wholesale when that script changes.  Rather than editing it in place,
-# this file wraps the helpers whose defects reached user-facing output, keeping
-# the bundle pristine and the corrections reviewable in one spot.
+# re-synced wholesale when that script changes.  This file wraps the helpers whose
+# defects reached user-facing output, keeping the bundle pristine and the
+# corrections reviewable in one spot.
+#
+# STATUS: both fixes were also applied upstream in the production AERMET.R on
+# 2026-07-26, and engine.R has been re-synced from it -- so these wrappers are
+# currently redundant.  They are kept deliberately: both are idempotent (re-parsing
+# yields the same numbers; de-duplicating an already-unique table is a no-op), so
+# they cost nothing, and they stop an older or un-patched AERMET.R from silently
+# reintroducing either defect the next time engine.R is re-synced.
 #
 # Must be sourced AFTER engine.R (see bootstrap.R).
 # =============================================================================

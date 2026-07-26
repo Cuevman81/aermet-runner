@@ -197,6 +197,12 @@ and an expandable checklist (auto-expanded when it isn't a clean PASS):
   (regular + ADJ_U*), **zero error messages** in the `.RP2` summaries, all
   `.sfc`/`.pfl` output files present, non-empty and stamped with the right year,
   and confirmation that upper-air and surface observations were actually ingested.
+- **1-minute ASOS winds actually used** — that the AERMINUTE record was accepted
+  rather than silently rejected. AERMET discards the whole 1-minute dataset if the
+  WBAN in the AERMINUTE header does not string-match the surface WBAN, and reports
+  it only as a *warning*, so the run still "succeeds" while quietly falling back to
+  standard hourly winds. That fallback inflates calm hours severely, so this is a
+  **FAIL**, not a warning.
 - **Data completeness** — each year's annual and per-quarter percentages against
   the EPA 90%-per-quarter target (a quarter below 90% is a **WARN**, i.e. a data-
   availability note, not a processing error), plus a check that the `.sfc` actually
@@ -236,9 +242,21 @@ only the QA panel and the two report documents were wrong.
   climatic one). Incomplete years are excluded from the period mean and named in the
   run log.
 
-These corrections live in `backend/engine_fixes.R`, which wraps the bundled engine
-rather than editing it, so `backend/engine.R` stays a verbatim copy of the MDEQ
-production `AERMET.R` and can still be re-synced wholesale.
+- **1-minute ASOS winds could be silently discarded.** AERMINUTE writes the station
+  WBAN space-padded in its hour-file header (`WBAN:  3940`), but AERMET carries it
+  zero-padded (`03940`) and compares the two as strings. For any station whose WBAN
+  has a leading zero, AERMET rejected the **entire** 1-minute wind record with a
+  *warning* — so the run still reported success while falling back to standard
+  hourly winds. The effect is large: reprocessing one affected station-year took it
+  from 0 to 8784 one-minute hours and from **1888 calm hours down to 106**. The
+  header is now zero-padded automatically after AERMINUTE runs, and QA fails the
+  run if the 1-minute data was not ingested.
+
+The first three corrections live in `backend/engine_fixes.R`, which wraps the
+bundled engine rather than editing it. The WBAN fix and the RP2/de-duplication
+fixes were also applied upstream in the MDEQ production `AERMET.R` on 2026-07-26
+and `backend/engine.R` re-synced from it, so the two stay byte-identical; the
+wrappers remain as idempotent guards against an un-patched re-sync.
 
 ## AERSURFACE options
 

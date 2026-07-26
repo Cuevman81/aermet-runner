@@ -440,7 +440,32 @@ run_aerminute <- function(station_paths, root_directory) {
   if (!file.exists(hour_file) || file.size(hour_file) == 0 ||
       file.info(hour_file)$mtime < run_started)
     stop("AERMINUTE did not produce a fresh AERMINUTE_hour.dat (stale or missing)")
+  pad_aerminute_wban(hour_file)
   cat("AERMINUTE processing complete\n")
+}
+
+# AERMINUTE writes the WBAN space-padded in the hour-file header ("WBAN:  3940"),
+# but AERMET's LOCATION keyword carries it zero-padded ("03940"). AERMET compares
+# the two as strings, so for any station whose WBAN has a leading zero it emits
+#
+#   W40  READ_1MIN  AERMINUTE WBAN 3940 DOES NOT MATCH SURFACE WBAN 03940
+#   W56  READ_1MIN  DO NOT PROCESS 1-MINUTE DATA
+#
+# and silently discards the ENTIRE 1-minute wind record -- a warning, not an error,
+# so the run still "succeeds". The effect is large: KJAN 2021 went from 0 to 8784
+# 1-minute hours and from 1888 to 106 calm hours once the header was padded.
+# Zero-pad it to 5 digits, preserving the column width AERMET expects.
+pad_aerminute_wban <- function(hour_file) {
+  ln <- readLines(hour_file, warn = FALSE)
+  if (!length(ln)) return(invisible(FALSE))
+  m <- regmatches(ln[1], regexec("WBAN:( *)([0-9]+)", ln[1]))[[1]]
+  if (length(m) < 3) return(invisible(FALSE))
+  if (nchar(m[3]) >= 5) return(invisible(FALSE))          # already 5 digits
+  ln[1] <- sub("WBAN:( *)([0-9]+)", sprintf("WBAN: %05d", as.integer(m[3])), ln[1])
+  writeLines(ln, hour_file)
+  cat(sprintf("  padded AERMINUTE WBAN %s -> %05d so AERMET accepts the 1-minute data\n",
+              m[3], as.integer(m[3])))
+  invisible(TRUE)
 }
 
 # ------------------------------- AERMET Stage 1 --------------------------------------
@@ -681,10 +706,15 @@ parse_rp2_file <- function(rp2_file) {
   if (!file.exists(rp2_file)) return(NULL)
   content <- readLines(rp2_file, warn = FALSE)
   stats <- list()
+  # First integer that FOLLOWS the label. This used to anchor on the end of the
+  # line ("\\D*(\\d+)\\s*$"), which silently returned NA whenever AERMET puts a
+  # word after the number -- e.g. "ERROR MESSAGES        0 MESSAGES" -- so the
+  # verification report printed "Errors: NA | Warnings: NA".
   num_after <- function(pattern, lines) {
     hit <- grep(pattern, lines, value = TRUE)
     if (length(hit) == 0) return(NA)
-    suppressWarnings(as.numeric(gsub("\\D*(\\d+)\\s*$", "\\1", hit[1])))
+    m <- regmatches(hit[1], regexec(paste0(pattern, "\\D*?(\\d+)"), hit[1]))[[1]]
+    if (length(m) >= 2) suppressWarnings(as.numeric(m[2])) else NA
   }
   obs_start <- grep("TOTAL OBSERVATION COUNTS", content)
   if (length(obs_start) > 0) {
@@ -695,7 +725,9 @@ parse_rp2_file <- function(rp2_file) {
   }
   pbl_start <- grep("PBL PROCESSING SUMMARY", content)
   if (length(pbl_start) > 0) {
-    pbl <- content[(pbl_start + 1):min(pbl_start + 12, length(content))]
+    # 25 lines, not 12: the TEMPERATURE substitution count sits on line 13 of this
+    # block, so a 12-line window always returned NA for temp_subs.
+    pbl <- content[(pbl_start + 1):min(pbl_start + 25, length(content))]
     stats$no_convective_days <- num_after("NO CONVECTIVE CONDITIONS:", pbl)
     stats$total_calms        <- num_after("NUMBER OF TOTAL CALMS:", pbl)
     stats$variable_winds     <- num_after("NUMBER OF VARIABLE WINDS:", pbl)
@@ -816,6 +848,13 @@ read_sfc_data <- function(station_dir, station_code, years, suffix = "") {
   d <- do.call(rbind, out)
   # normalize 2-digit years from older AERMET versions
   d$year <- ifelse(!is.na(d$year) & d$year < 100, d$year + 2000, d$year)
+  # AERMET is driven with XDATES <y>/01/01 TO <y+1>/01/01, so every yearly .sfc
+  # ends with the 24 hours of 1 January of the FOLLOWING year (deliberate -- the
+  # .sfc files themselves are left exactly as AERMET wrote them). Stacking the
+  # yearly files therefore delivered 1 January twice for every year after the
+  # first, which double-weighted that day in the report and pushed the reported
+  # "valid hrs" above the number of hours in the year. Keep one row per hour.
+  d <- d[!duplicated(d[, c("year", "month", "day", "hour")]), , drop = FALSE]
   # missing-value masks (AERMET indicators / physical bounds)
   d$ws  [is.na(d$ws)  | d$ws < 0 | d$ws >= 90]              <- NA
   d$wd  [is.na(d$wd)  | d$wd < 0 | d$wd > 360]              <- NA

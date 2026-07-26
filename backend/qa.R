@@ -155,6 +155,30 @@ qa_aermet <- function(station_dir, icao, y1, y2) {
                                           isTRUE((s$ua_obs %||% 0) == 0), logical(1)))
   chk <- c(chk, list(.qa_chk(grp, "Upper-air & surface observations ingested",
     if (any_zero) "warn" else "info", obs_txt)))
+
+  # 6) the 1-minute ASOS winds were actually USED.
+  # AERMET rejects the whole AERMINUTE record if the WBAN in the hour-file header
+  # does not string-match the surface WBAN (a leading-zero WBAN like 03940 arrives
+  # from AERMINUTE as "3940"). It reports that as a WARNING, so the run still
+  # "succeeds" while quietly falling back to standard hourly winds -- which inflates
+  # calms dramatically. Only meaningful when AERMINUTE actually ran for this site.
+  hour_file <- file.path(station_dir, "AERMINUTE_hour.dat")
+  if (file.exists(hour_file) && file.size(hour_file) > 0) {
+    a1 <- vapply(obs, function(s) as.numeric(s$asos_obs %||% NA), numeric(1))
+    got <- sum(a1 > 0, na.rm = TRUE)
+    mism <- unlist(lapply(years, function(y) {
+      mg <- file.path(station_dir, sprintf("%s%d.MG2", icao, y))
+      if (file.exists(mg)) grep("DOES NOT MATCH SURFACE WBAN", readLines(mg, warn = FALSE),
+                                value = TRUE) else character(0)
+    }))
+    chk <- c(chk, list(.qa_chk(grp, "1-minute ASOS winds (AERMINUTE) ingested",
+      if (got == length(years)) "pass" else "fail",
+      if (length(mism))
+        sprintf("%d/%d years used them — AERMET rejected the AERMINUTE file: %s",
+                got, length(years), trimws(sub(".*(AERMINUTE WBAN.*)", "\\1", mism[1])))
+      else sprintf("%d/%d years used them (%s hourly obs)", got, length(years),
+                   paste(vapply(a1, fmt_int, character(1)), collapse = "/")))))
+  }
   chk
 }
 
