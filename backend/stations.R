@@ -10,6 +10,8 @@ suppressWarnings(suppressMessages({
   library(httr); library(readr); library(dplyr); library(stringr)
 }))
 
+NON_CONUS_STATES <- c("AK", "HI", "PR", "VI", "GU", "AS", "MP")
+
 ISD_HISTORY_URL  <- "https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv"
 IGRA_STATION_URL <- "https://www.ncei.noaa.gov/pub/data/igra/igra2-station-list.txt"
 
@@ -54,6 +56,9 @@ load_surface_stations <- function(cache_dir = "cache") {
     filter(CTRY == "US", !is.na(ICAO), nchar(ICAO) == 4,
            !is.na(WBAN), WBAN != "", WBAN != "99999",
            !is.na(STATE), STATE != "",
+           # contiguous US only: the NLCD fetch is the L48 product and the control
+           # files assume west longitude, so AK/HI/PR/VI runs cannot complete yet
+           !(STATE %in% NON_CONUS_STATES),
            !is.na(LAT), !is.na(LON), !(LAT == 0 & LON == 0),
            !is.na(END_YR), END_YR >= (cur - 2)) %>%
     arrange(ICAO, desc(END_YR)) %>% distinct(ICAO, .keep_all = TRUE) %>%
@@ -105,7 +110,10 @@ nearest_igra <- function(lat, lon, igra_df) {
 resolve_station <- function(icao, surf_df, igra_df) {
   icao <- toupper(icao)
   s <- surf_df[surf_df$ICAO == icao, ]
-  if (nrow(s) == 0) stop(sprintf("ICAO %s not found among active US ASOS stations", icao))
+  if (nrow(s) == 0)
+    stop(sprintf(paste0("ICAO %s not found among active contiguous-US ASOS stations ",
+                        "(Alaska, Hawaii, Puerto Rico and the Virgin Islands are not supported yet)"),
+                 icao))
   s <- s[1, ]
   ua <- nearest_igra(s$LAT, s$LON, igra_df)
   list(icao = icao, station_id = s$STATION_ID, wban = s$WBAN, usaf = s$USAF,

@@ -279,6 +279,24 @@ register_run_station <- function(icao, st) {
   invisible(TRUE)
 }
 
+# ---- Parse isd-history.txt once, not 5-6 times per station --------------------
+# The engine re-reads and parses the 3 MB fixed-width file line by line on every
+# call (about 24 s each).  Cache the parsed table per file and download time.
+.isd_memo <- new.env()
+.engine_get_isd_history <- get_isd_history
+get_isd_history <- function(cache_dir = NULL) {
+  f <- file.path(if (is.null(cache_dir)) file.path(getwd(), "cache") else cache_dir,
+                 "isd-history.txt")
+  key <- function() paste(normalizePath(f, mustWork = FALSE), file.info(f)$mtime)
+  fresh <- file.exists(f) &&
+    difftime(Sys.time(), file.info(f)$mtime, units = "days") <= 30
+  if (fresh && exists(key(), envir = .isd_memo, inherits = FALSE))
+    return(get(key(), envir = .isd_memo))
+  x <- .engine_get_isd_history(cache_dir)
+  if (file.exists(f)) assign(key(), x, envir = .isd_memo)
+  x
+}
+
 # QA rows stating the run settings a reviewer will ask about, and where each came from.
 .qa_settings <- function(opts, mi) {
   grp <- "Run settings"
@@ -326,6 +344,10 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
                               met_opts = NULL) {
   icao <- toupper(icao); y1 <- as.integer(y1); y2 <- as.integer(y2)
   stopifnot(y2 >= y1)
+  # AERMINUTE is run with a fixed ice-free-wind commission date (26 Mar 2007).  That
+  # is only safe for periods after 2009 (AERMINUTE User's Guide 26135, Sec. 4.1.2).
+  if (y1 < 2010) stop("Start year must be 2010 or later: AERMINUTE's ice-free-wind (sonic ",
+                      "anemometer) date is only known to precede the period after 2009.")
   anem <- met_opts$anem_height
   if (length(anem) && !is.na(anem) && (!is.numeric(anem) || anem < 1 || anem > 50))
     stop(sprintf("Anemometer height %s m is not plausible (expected 1-50 m).", anem))

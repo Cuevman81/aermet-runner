@@ -82,9 +82,9 @@ ui <- fluidPage(
                 placeholder = "more ICAOs, comma-separated: KGPT, KMEI, KTUP"),
       fluidRow(
         column(6, numericInput("y1", "Start year", value = CUR_YEAR - 5,
-                               min = 2000, max = CUR_YEAR, step = 1)),
+                               min = 2010, max = CUR_YEAR, step = 1)),
         column(6, numericInput("y2", "End year", value = CUR_YEAR - 1,
-                               min = 2000, max = CUR_YEAR, step = 1))),
+                               min = 2010, max = CUR_YEAR, step = 1))),
       tags$b("AERMET options"),
       fluidRow(
         column(6, numericInput("tadjust", "UTC offset (h)", value = NA,
@@ -229,8 +229,8 @@ server <- function(input, output, session) {
   observeEvent(input$run, {
     req(input$station, input$station != "")
     y1 <- as.integer(input$y1); y2 <- as.integer(input$y2)
-    if (is.na(y1) || is.na(y2) || y2 < y1 || y2 > CUR_YEAR) {
-      addlog("Invalid year range."); return()
+    if (is.na(y1) || is.na(y2) || y2 < y1 || y2 > CUR_YEAR || y1 < 2010) {
+      addlog("Invalid year range (start year 2010 or later)."); return()
     }
     primary <- toupper(input$station)
     icaos <- unique(c(primary, parse_icaos(input$stations_extra)))
