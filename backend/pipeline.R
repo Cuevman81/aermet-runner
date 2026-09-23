@@ -17,6 +17,8 @@ if (!exists("APP_ROOT")) stop("APP_ROOT must be set before sourcing pipeline.R (
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+RUNNER_VERSION <- "1.4"   # app version (app.R shows it; stamped into each dataset README)
+
 # Per-run context read by the overridden seams (single-threaded Shiny session).
 pipeline_env <- new.env()
 
@@ -235,6 +237,31 @@ generate_verification_report <- function(results, station_code, start_year, end_
   if (isTRUE(pipeline_env$anem_entered))
     sprintf("NWS_HGT %.2f m entered by the user", pipeline_env$anem_height)
   else "NWS_HGT default 10 m, not verified for this station"
+}
+
+# ---- Seam 8: the dataset README names the tool and this run, not MDEQ ---------
+create_readme <- function(station_code, start_year, end_year) {
+  tz <- pipeline_env$tadjust
+  winds <- if (isFALSE(pipeline_env$has_aerminute))
+    "hourly GHCNh winds (NCEI has no 1-minute ASOS archive for this station and period)"
+  else sprintf("AERMINUTE %s hourly-averaged 1-minute ASOS winds", AERMET_VERSION)
+  paste0(
+    sprintf("AERMOD-ready meteorological data for %s, %d-%d.\n\n", station_code, start_year, end_year),
+    sprintf("Processed with AERMET %s using GHCNh surface data (NCEI), IGRA upper air\n", AERMET_VERSION),
+    sprintf("soundings, %s,\nand AERSURFACE 26135 surface characteristics (NLCD %s).\n\n", winds,
+            as.character(pipeline_env$aers_opts$nlcd_year %||% 2021)),
+    if (!is.null(tz)) sprintf("UTC to local standard time offset (AERMET tadjust): %d h, from %s.\n",
+                              tz$value, tz$source) else "",
+    sprintf("Anemometer height: %.2f m (%s).\n\n", pipeline_env$anem_height %||% 10, .anem_text()),
+    sprintf("Files %s[YYYY].sfc/.pfl were processed without ADJ_U*;\n", station_code),
+    sprintf("files %s[YYYY]US.sfc/.pfl were processed with METHOD STABLEBL ADJ_U*.\n\n", station_code),
+    "See the included met report PDF for wind roses, climatology, mixing height,\n",
+    "stability, and data-completeness graphics, the verification report for\n",
+    "quarterly completeness statistics, and the QA summary.\n\n",
+    sprintf("Produced with AERMET Runner v%s (https://github.com/Cuevman81/aermet-runner),\n",
+            RUNNER_VERSION),
+    "which runs the EPA programs named above. Direct questions about this dataset to\n",
+    "whoever produced it; report problems with the tool itself on GitHub.")
 }
 
 # ---- The engine's report and PDF look stations up in STATION_REGISTRY ---------
