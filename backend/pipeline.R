@@ -328,6 +328,45 @@ get_isd_history <- function(cache_dir = NULL) {
             else "NOSNOW -- tick the option only if the ground was snow-covered more than half of each winter month"))
 }
 
+# ---- GHCNh: does NCEI have the file the engine will ask for? ------------------
+# The engine fetches GHCNh as USW000 + WBAN.  NCEI files a few stations under another
+# id: KLNN (WBAN 04809 in isd-history) is USI0000KLNN in its GHCNh station list.  AERMET
+# 26135 reads the WBAN from characters 4-11 of that id (mod_surface.f90, read_ghcn)
+# and stops on one that is not numeric (E47, "invalid station identifier in surface
+# data file"), so such a station cannot be run from GHCNh as NCEI serves it.  Check
+# each year with HEAD (no data transferred) before the upper air, NLCD and AERSURFACE
+# are fetched, and say why; the engine would otherwise report "GHCNh download failed"
+# after all of that.  If NCEI cannot be reached, the download itself reports it.
+.GHCNH_PSV_URL <- paste0("https://www.ncei.noaa.gov/oa/global-historical-climatology-network/",
+                         "hourly/access/by-year/%d/psv/GHCNh_%s_%d.psv")
+.GHCNH_STATION_LIST_URL <- paste0("https://www.ncei.noaa.gov/oa/global-historical-climatology-",
+                                  "network/hourly/doc/ghcnh-station-list.csv")
+check_ghcnh_files <- function(st, y1, y2, cache_dir) {
+  code <- vapply(y1:y2, function(y) tryCatch(
+    httr::status_code(httr::HEAD(sprintf(.GHCNH_PSV_URL, y, st$ghcnh_id, y), httr::timeout(60))),
+    error = function(e) NA_integer_), integer(1))
+  gone <- (y1:y2)[!is.na(code) & code == 404]
+  if (!length(gone)) return(invisible(TRUE))
+  g <- tryCatch(readr::read_csv(.download_cached(.GHCNH_STATION_LIST_URL,
+                                  file.path(cache_dir, "ghcnh-station-list.csv")),
+                                col_types = readr::cols(.default = "c"),
+                                progress = FALSE, show_col_types = FALSE),
+                error = function(e) NULL)
+  if (!all(c("GHCN_ID", "ICAO") %in% names(g))) g <- NULL
+  other <- if (is.null(g)) character(0) else
+    setdiff(g$GHCN_ID[!is.na(g$ICAO) & g$ICAO == st$icao], st$ghcnh_id)
+  why <- if (is.null(g)) ""
+  else if (length(other))
+    sprintf("NCEI's GHCNh station list files %s as %s.%s", st$icao, paste(other, collapse = ", "),
+            if (any(grepl("^...[0-9]{8}$", other))) "" else paste0(
+              " AERMET reads the station's WBAN from that id and stops on one that is not ",
+              "numeric (E47), so this station cannot be processed from GHCNh."))
+  else if (st$ghcnh_id %in% g$GHCN_ID) "Choose years in which the station reported."
+  else "Nor is it in NCEI's GHCNh station list."
+  stop(trimws(sprintf("NCEI has no GHCNh file for %s under %s (HTTP 404 for %s). %s",
+                      st$icao, st$ghcnh_id, paste(gone, collapse = ", "), why)))
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -363,6 +402,10 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   surf <- load_surface_stations(cache_dir)
   igra <- load_igra_stations(cache_dir)
   st   <- resolve_station(icao, surf, igra)
+  ghcnh_done <- file.path(output_root, sprintf("%s_%d_%d", icao, y1, y2), icao,
+                          sprintf("%s_GHCNh_%d_%d.psv", icao, y1, y2))   # left by an earlier run
+  if (!(file.exists(ghcnh_done) && file.size(ghcnh_done) > 0))
+    check_ghcnh_files(st, y1, y2, cache_dir)
 
   # Merge user options over latitude-based defaults
   opts <- default_aersurface_opts(st$lat)

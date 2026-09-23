@@ -501,6 +501,11 @@ surface characteristics match the regional-tile workflow byte-for-byte.
   AERMET 26135's secondary upper-air substitution.
 - NLCD is the 2021 CONUS release. AK/HI/PR/VI use different NLCD/datum handling
   and are not yet wired in, so they are left out of the station list.
+- **KLNN (Willoughby, OH) cannot be run.** The app fetches GHCNh as `USW000` + WBAN,
+  but NCEI files KLNN only as `USI0000KLNN`, and AERMET reads the WBAN from that id
+  and stops on one that is not numeric (error E47). It is the only listed station
+  affected. Before it fetches any met or land-cover data, the app checks that NCEI
+  has the station's GHCNh file for every year, and stops with the reason if not.
 
 ## License & attribution
 
