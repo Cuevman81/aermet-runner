@@ -2,12 +2,17 @@
 # pipeline.R -- orchestrates the full AERMOD-ready met build for ANY US site.
 #
 # It reuses the tested MDEQ AERMET/AERMINUTE engine (R/engine.R, a bundled copy
-# of AERMET.R) unchanged, and overrides just three seams so the engine works for
-# an arbitrary station with on-demand AERSURFACE:
+# of AERMET.R) unchanged, and overrides a few seams so the engine works for an
+# arbitrary station with on-demand AERSURFACE:
 #   * find_exe             -> resolve bundled binaries from <app_root>/bin
 #   * fetch_aersurface_file-> run AERSURFACE on-demand (NLCD WCS) instead of
 #                             copying a pre-made file
 #   * get_icao_from_igra   -> tolerant upper-air ICAO labelling for any site
+#   * get_station_info     -> the station's own UTC-to-LST offset (tadjust)
+#   * check_aerminute_availability -> probe the whole window, not one month
+#   * create_stage2_content-> the station's anemometer height (NWS_HGT)
+#   * generate_verification_report / create_readme -> describe THIS run
+# engine.R itself stays a byte-identical copy of the MDEQ production AERMET.R.
 # =============================================================================
 
 # APP_ROOT (repo root) must be defined before this file is sourced -- see

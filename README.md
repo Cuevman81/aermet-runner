@@ -143,6 +143,18 @@ shiny::runApp()
 Then pick a state → station (map or dropdown) → year range → options →
 **Build met data**.
 
+Two AERMET options can be left blank:
+
+- **UTC offset (h)** — GHCNh and IGRA are in UTC, and AERMET needs the station's
+  offset to local *standard* time (5 Eastern, 6 Central, 7 Mountain, 8 Pacific).
+  Blank = read it from the station's own 1-minute ASOS file, or from its state when
+  the state lies in one time zone. In a split state (FL, ID, IN, KS, KY, MI, ND, NE,
+  NV, OR, SD, TN, TX) with no 1-minute data the run stops and asks for it.
+- **Anemometer height (m)** — blank = 10 m. ASOS anemometers are typically 10.1 m
+  or 7.9 m; AERMET's guide says to look up the station's actual height.
+
+Both apply to the selected station only, not to the *Also process* list.
+
 **Multiple stations:** pick one station, then list additional ICAOs in the
 **"Also process"** box (comma-separated, e.g. `KGPT, KMEI, KTUP`). The app runs
 each in turn and writes a separate output folder per station.
@@ -152,6 +164,7 @@ You can also run it headless:
 APP_ROOT <- normalizePath(".")
 source(file.path(APP_ROOT, "backend", "bootstrap.R"))
 res <- run_full_pipeline("KJAN", 2020, 2024, output_root = "runs")
+# optional: met_opts = list(tadjust = 5, anem_height = 7.9)
 ```
 
 ---
@@ -320,9 +333,9 @@ to defend the data, not just what the pipeline happened to compute:
 - **Calms and missing hours** — counted explicitly, with a note that AERMOD excludes
   both from the averaging period.
 - **File guidance** — what `.sfc` and `.pfl` each carry, the regular vs `US` (ADJ_U*)
-  distinction and the warning not to mix them, and an explanation that the 24 hours
-  of 1 January of the following year at the end of each file are expected by AERMOD
-  and are not duplicated data.
+  distinction and the warning not to mix them, and a note on the 24 hours of
+  1 January of the following year at the end of each file (see *Using the yearly
+  files in AERMOD* below).
 - **Monthly completeness heatmap reframed.** The EPA criterion is quarterly, so the
   monthly grid now shows quarter boundaries and the quarterly figures alongside it,
   labelled as diagnostic. It answers "*which month cost me that quarter?*" — for
@@ -332,6 +345,69 @@ to defend the data, not just what the pipeline happened to compute:
   (quarters met, AERMET errors, non-physical values) and closes with per-file MD5
   checksums and hour counts.
 
+### Using the yearly files in AERMOD
+
+Each yearly `.sfc`/`.pfl` ends with the 24 hours of 1 January of the following
+year. That comes from the `XDATES y/01/01 TO y+1/01/01` convention MDEQ uses, and
+it matches MDEQ's production files byte for byte. AERMOD does **not** skip those
+hours on its own: "when the STARTEND keyword is omitted ... the default for the
+model is to read the entire meteorological data file" (AERMOD User's Guide 26135,
+§3.5.4). So:
+
+- modeling a single year: set `ME STARTEND y 1 1 y 12 31` (or AERMOD counts the
+  extra day in the annual and period averages);
+- stacking yearly files into one multi-year file: drop the last 24 records of each
+  year before concatenating, or 1 January appears twice at every join.
+
+The final year of a window also has no observations after 23:59 UTC on 31 December
+(the GHCNh by-year files are UTC years), so its last evening in local time (hours
+19-24 in Central time) is written as missing.
+
+### v1.4 corrections (2026-09-22 audit)
+
+> [!IMPORTANT]
+> **If you built met data for a station outside US Central time with v1.3 or
+> earlier, re-run it.** Stations on Central time (all of Mississippi, and every
+> MDEQ dataset) already had the right offset; for them the Stage 1 control files
+> are byte-identical to v1.3.
+
+- **Time zone.** Every station was processed as if it were on US Central time:
+  the UTC-to-local-standard-time offset AERMET needs for GHCNh surface and IGRA
+  upper-air data (`tadjust` on the Stage 1 `LOCATION` lines) was always 6. For an
+  Eastern station every temperature, cloud and sounding landed an hour early
+  against the 1-minute winds, which are already in local time; Pacific stations
+  were two hours off. The offset now comes from the station's own 1-minute ASOS
+  file (its local-standard and UTC time columns), else its state, else you are
+  asked — and both `LOCATION` lines use the surface station's value, because
+  AERMET computes the site's sunrise from the upper-air line's offset. It is
+  shown in the run log, the QA panel, the verification report and the dataset
+  README.
+- **Continuous snow.** Ticking *Continuous winter snow* wrote an invalid
+  AERSURFACE season keyword (`WINTERSN`; the keyword is `WINTERWS`), so AERSURFACE
+  aborted. It now works. The "auto-on above ~45°N" default never took effect in
+  the app and is gone (see *AERSURFACE options*).
+- **1-minute winds.** Whether a station got AERMINUTE at all was decided by a
+  single download of January of the first year; if that one month was missing or
+  slow, every year fell back to hourly winds, with no QA row. The app now checks
+  every month of the window, stops if NCEI can't be reached, and QA warns
+  whenever AERMINUTE did not run.
+- **Reports.** The verification report and PDF now find the AERSURFACE file (and
+  print its monthly table and version), and name the upper-air station the run
+  actually used; they used to show MDEQ's own pairing (e.g. Jackson for Tupelo,
+  where the app uses Birmingham), or no upper-air block at all.
+- **Anemometer height** can be entered (was fixed at 10 m), and the reports say
+  whether it was entered or defaulted.
+- **Auto surface moisture** now says when it had to default to Average and why,
+  and reports the real record length instead of always "30-yr".
+- **Dataset README** now names the tool and the run's settings; it used to give
+  MDEQ and a personal contact for every dataset, whoever produced it.
+- **Station list** leaves out Alaska, Hawaii, Puerto Rico and the Virgin Islands,
+  which could be selected but could not complete (NLCD is fetched for the
+  contiguous US only). **Start year** is 2010 or later, because AERMINUTE is run
+  with a fixed ice-free-wind date that is only safe after 2009.
+- Station metadata is parsed once per run instead of five or six times (about two
+  minutes saved per station).
+
 ## AERSURFACE options
 
 The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:
@@ -340,8 +416,15 @@ The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:
   Auto follows EPA guidance: it pulls the site's own GHCN-Daily annual precipitation,
   builds a 30-year climatology, and classifies the modeled period — wettest 30% →
   **wet**, driest 30% → **dry**, middle 40% → **average**. The per-year totals and
-  thresholds are printed to the run log so the basis is transparent.
-- **Continuous winter snow** — off by default (auto-on above ~45°N).
+  thresholds are printed to the run log so the basis is transparent. A record
+  shorter than 30 years is used if that is all there is, but the log and the QA
+  panel say how many years it had; if the record can't be read at all the value is
+  **defaulted** to Average and QA shows a warning — set it by hand in that case.
+- **Continuous winter snow** — off by default. Tick it only if the site had
+  continuous snow cover, which AERSURFACE defines as ground snow-covered more than
+  50% of the month. It is a property of the site's record, not of latitude (Seattle
+  and Portland are north of 45°N and rarely keep snow on the ground). It can't be
+  combined with **Arid climate**; AERSURFACE rejects that pair.
 - **Arid climate** — off by default.
 - **Airport site** — on by default (ASOS stations are at airports).
 
@@ -397,8 +480,8 @@ surface characteristics match the regional-tile workflow byte-for-byte.
   and a gap shows up in the QA panel as a low upper-air observation count rather than
   as an error. If you see one, either substitute a nearby sounding site or use
   AERMET 26135's secondary upper-air substitution.
-- NLCD is the 2021 CONUS release. AK/HI/PR use different NLCD/datum handling and
-  are not yet wired in.
+- NLCD is the 2021 CONUS release. AK/HI/PR/VI use different NLCD/datum handling
+  and are not yet wired in, so they are left out of the station list.
 
 ## License & attribution
 
