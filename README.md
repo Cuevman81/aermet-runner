@@ -20,7 +20,7 @@ For the station and years you choose, the app automatically:
 2. **Runs AERSURFACE** — fetches **NLCD** land cover, impervious, and tree-canopy
    for the site *on demand* from the MRLC Web Coverage Service (no bundled land
    cover), derives **airport (AP) vs non-airport (NONAP) sectors** from real
-   runway geometry, writes a control file with latitude-based season/climate
+   runway geometry, writes a control file with latitude-based season
    defaults, and runs AERSURFACE 26135.
 3. **Gathers the met data** — GHCNh hourly surface (`.psv`), 1-minute & 5-minute
    ASOS winds (for AERMINUTE), and IGRA upper-air soundings.
@@ -30,7 +30,8 @@ For the station and years you choose, the app automatically:
    report, and a zip, in a per-run folder.
 
 The heavy lifting reuses the tested MDEQ AERMET/AERMINUTE engine unchanged; only
-the station resolution and the on-demand AERSURFACE step are added on top.
+the station resolution, the on-demand AERSURFACE step and the per-station AERMET
+settings (UTC offset, anemometer height) are added on top.
 
 ---
 
@@ -85,14 +86,18 @@ the three EPA executables. The app auto-selects the right build:
 | OS | Binaries used | Status |
 |----|---------------|--------|
 | **Windows** | `bin/<tool>_26135.exe` (official EPA v26135) | ✅ works out of the box |
-| **macOS** | `bin/<tool>_26135_mac` | ✅ works out of the box* |
+| **macOS** | `bin/<tool>_26135_mac` | ⚠️ Intel build; needs Homebrew GCC* |
 | **Linux** | `bin/<tool>_26135_linux` | ⚠️ add binaries (see below) |
 
-- **Windows / macOS:** everything needed is bundled — clone and run.
+- **Windows:** everything needed is bundled — clone and run.
+- **\*macOS:** the Mac builds are Intel (x86_64) and load the GCC runtime
+  libraries from an Intel Homebrew (`/usr/local/opt/gcc/lib/gcc/current`), so
+  install it once with `brew install gcc`. On Apple Silicon they need Rosetta 2
+  plus that Intel Homebrew under `/usr/local`; the Apple Silicon one in
+  `/opt/homebrew` can't serve an Intel binary.
 - **\*macOS Gatekeeper:** the Mac builds are unsigned, so the first run may be
   blocked. Clear the quarantine flag once: `xattr -dr com.apple.quarantine bin/`
-  (or right-click each binary → Open). The Mac builds are Intel; on Apple Silicon
-  they run under Rosetta 2.
+  (or right-click each binary → Open).
 - **Linux:** EPA does not distribute Linux binaries, so compile AERMET, AERMINUTE
   and AERSURFACE v26135 from EPA source with `gfortran` and place them in `bin/`
   as `aermet_26135_linux`, `aerminute_26135_linux`, `aersurface_26135_linux`. The
@@ -127,8 +132,8 @@ source("install_deps.R")
 ```
 
 The bundled EPA binaries in `bin/` are already included by the clone — nothing else
-to download (macOS/Windows). See **Platform support** for the one macOS Gatekeeper
-step and the Linux note.
+to download on Windows. See **Platform support** for the macOS GCC runtime and
+Gatekeeper steps and the Linux note.
 
 ## Run it
 
@@ -172,9 +177,10 @@ res <- run_full_pipeline("KJAN", 2020, 2024, output_root = "runs")
 ## Output
 
 ```
-runs/<ICAO>_<y1>_<y2>/
-  <ICAO>/                     # AERMET working + output files (.sfc, .pfl, report, zip)
-    aersurface/               # NLCD clips, control file, AERSURFACE outputs
+runs/
+  <ICAO>_<y1>_<y2>/
+    <ICAO>/                   # AERMET working + output files (.sfc, .pfl, report, zip)
+      aersurface/             # NLCD clips, control file, AERSURFACE outputs
   cache/                      # station lists, precip records, per-site NLCD (reused)
 ```
 
@@ -272,7 +278,7 @@ only the QA panel and the two report documents were wrong.
   header is now zero-padded automatically after AERMINUTE runs, and QA fails the
   run if the 1-minute data was not ingested.
 
-The first three corrections live in `backend/engine_fixes.R`, which wraps the
+The second and third corrections live in `backend/engine_fixes.R`, which wraps the
 bundled engine rather than editing it. The WBAN fix and the RP2/de-duplication
 fixes were also applied upstream in the MDEQ production `AERMET.R` on 2026-07-26
 and `backend/engine.R` re-synced from it, so the two stay byte-identical; the
@@ -292,7 +298,7 @@ and KTUP 2025 carried 25 more. Across an 18-station, 5-year Mississippi dataset 
 was 78 hours out of 789,264 (0.010%), which is negligible for modelled
 concentrations but indefensible in a file a reviewer will open.
 
-Two screens now run before AERMET sees the data. Both only ever **blank** a value,
+Three screens now run before AERMET sees the data. All only ever **blank** a value,
 so the element becomes missing and AERMET falls back to AERMINUTE or its own
 substitution logic — no record is dropped and no value is altered or invented:
 
@@ -305,12 +311,22 @@ substitution logic — no record is dropped and no value is altered or invented:
    METAR that plainly reads `25010KT` (5.1 m/s) — and NCEI flags one of them
    `qc=5`, "passed all checks". The quality codes cannot catch that; the
    cross-check can. Wind *direction* was checked the same way across 821,424 METAR
-   groups with zero disagreement, so only speed is screened.
+   groups with zero disagreement, so this screen checks only speed.
+3. **Short SYNOPs** (v1.4). Some ASOS sites also send short FM-12 SYNOPs that leave
+   out the wind group, and NCEI's decoder then reads the next group (the report's
+   time, pressure, temperature or weather group) as the wind and its first digit as
+   the total sky cover. Many of these values pass NCEI's quality codes. The screen
+   recognises the pattern in the report text in `REM` and blanks the wind direction,
+   wind speed, sky cover and ceiling decoded from it. On the 18 Mississippi stations
+   2021–2025 it matched 110 reports (KJAN 4, KMEI 55, KMOB 6, KTUP 45). It changes
+   the `.sfc` wherever it fires, Central-time stations included.
 
 Every rejection is itemised in `<STATION>_GHCNh_<y1>_<y2>_qc_log.txt` beside the
 data — timestamp, element, rejected value and quality code — so the edit is fully
 auditable. The log is append-safe: re-running over an already-screened file rejects
-nothing and leaves the existing log intact rather than overwriting it with zeroes.
+nothing and leaves the existing log intact rather than overwriting it with zeroes;
+a pass that does blank something new (e.g. screen 3 on a file screened before it
+existed) is appended to the log.
 The QA panel confirms the screen ran and flags any implausible value that survived
 into the delivered files.
 
@@ -341,9 +357,10 @@ to defend the data, not just what the pipeline happened to compute:
   labelled as diagnostic. It answers "*which month cost me that quarter?*" — for
   example a quarter passing at 90.3% where one month sits at 81% — without implying
   a monthly standard that does not exist.
-- **Verification report** now opens with an overall **PASS / FAIL** verdict
-  (quarters met, AERMET errors, non-physical values) and closes with per-file MD5
-  checksums and hour counts.
+- **Verification report** now opens with an overall verdict that keeps processing
+  (AERMET errors, non-physical values: **PASS / REVIEW**) separate from data
+  completeness (quarters meeting the EPA criterion: **PASS / SEE NOTE**), and closes
+  with per-file MD5 checksums and hour counts.
 
 ### Using the yearly files in AERMOD
 
@@ -418,8 +435,9 @@ The app exposes the site-dependent AERSURFACE inputs, defaulted sensibly:
   **wet**, driest 30% → **dry**, middle 40% → **average**. The per-year totals and
   thresholds are printed to the run log so the basis is transparent. A record
   shorter than 30 years is used if that is all there is, but the log and the QA
-  panel say how many years it had; if the record can't be read at all the value is
-  **defaulted** to Average and QA shows a warning — set it by hand in that case.
+  panel say how many years it had; if the record can't be read at all, or has fewer
+  than 10 complete years, the value is **defaulted** to Average and QA shows a
+  warning — set it by hand in that case.
 - **Continuous winter snow** — off by default. Tick it only if the site had
   continuous snow cover, which AERSURFACE defines as ground snow-covered more than
   50% of the month. It is a property of the site's record, not of latitude (Seattle
@@ -470,8 +488,9 @@ surface characteristics match the regional-tile workflow byte-for-byte.
 
 ## Notes & limits
 
-- A run downloads a few hundred MB (mostly the IGRA period-of-record) and takes
-  several minutes; the app is single-user and processes synchronously.
+- A run downloads a few hundred MB (about 500 MB for a 5-year window, mostly the
+  1-minute ASOS winds and the IGRA period-of-record) and takes several minutes; the
+  app is single-user and processes synchronously.
 - Upper-air pairing uses the **nearest active** IGRA site — in radiosonde-sparse
   regions that can be a few hundred km; confirm it suits your application.
 - **Check upper-air availability for your window.** Pairing picks the nearest site
