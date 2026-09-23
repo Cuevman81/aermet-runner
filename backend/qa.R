@@ -163,7 +163,17 @@ qa_aermet <- function(station_dir, icao, y1, y2) {
   # "succeeds" while quietly falling back to standard hourly winds -- which inflates
   # calms dramatically. Only meaningful when AERMINUTE actually ran for this site.
   hour_file <- file.path(station_dir, "AERMINUTE_hour.dat")
-  if (file.exists(hour_file) && file.size(hour_file) > 0) {
+  # Did Stage 2 actually ask for the 1-minute winds?  (When no 1-minute archive is
+  # found for the window the engine leaves ASOS1MIN out and AERMINUTE never runs;
+  # that used to leave no row at all, so the fallback to hourly winds was invisible.)
+  in2 <- file.path(station_dir, sprintf("%s%d.IN2", icao, years))
+  asked <- any(vapply(in2, function(f) file.exists(f) &&
+                        any(grepl("^\\s*ASOS1MIN\\s", readLines(f, warn = FALSE))), logical(1)))
+  if (!asked) {
+    chk <- c(chk, list(.qa_chk(grp, "1-minute ASOS winds (AERMINUTE) ingested", "warn",
+      paste("AERMINUTE did not run: NCEI has no 1-minute ASOS archive for this station and",
+            "period, so the winds are the standard hourly reports (typically many more calms)."))))
+  } else if (file.exists(hour_file) && file.size(hour_file) > 0) {
     a1 <- vapply(obs, function(s) as.numeric(s$asos_obs %||% NA), numeric(1))
     got <- sum(a1 > 0, na.rm = TRUE)
     mism <- unlist(lapply(years, function(y) {

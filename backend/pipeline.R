@@ -154,6 +154,40 @@ get_station_info <- function(station_code, station_id, ua_station_id, cache_dir 
   info
 }
 
+# ---- Seam 5: is there 1-minute ASOS data anywhere in the window? -------------
+# The engine asks about January of the first year only, with a 30 s GET of the whole
+# month; a missing month, a slow download or an NCEI hiccup there switched
+# AERMINUTE off for every year.  Probe each month of the window with HEAD (no data
+# transferred) and stop at the first hit.  If NCEI could not be reached at all,
+# stop rather than silently fall back to hourly winds.
+.ASOS_1MIN_URL <- paste0("https://www.ncei.noaa.gov/data/automated-surface-observing-",
+                         "system-one-minute-pg1/access/%d/%02d/asos-1min-pg1-%s-%d%02d.dat")
+check_aerminute_availability <- function(station_code, year, month) {
+  y2 <- pipeline_env$end_year %||% year
+  onemin <- file.path(pipeline_env$station_dir %||% "", "1min")
+  if (length(list.files(onemin, pattern = "\\.dat$"))) {        # already downloaded
+    pipeline_env$has_aerminute <- TRUE
+    return(TRUE)
+  }
+  cy <- as.integer(format(Sys.Date(), "%Y")); cm <- as.integer(format(Sys.Date(), "%m"))
+  errs <- 0L
+  for (y in seq(year, y2)) for (m in 1:12) {
+    if (y > cy || (y == cy && m > cm)) next
+    url  <- sprintf(.ASOS_1MIN_URL, y, m, station_code, y, m)
+    head <- function() tryCatch(httr::status_code(httr::HEAD(url, httr::timeout(60))),
+                                error = function(e) NA_integer_)
+    code <- head()
+    if (is.na(code)) { Sys.sleep(2); code <- head() }          # one retry per month
+    if (isTRUE(code == 200)) { pipeline_env$has_aerminute <- TRUE; return(TRUE) }
+    if (is.na(code)) errs <- errs + 1L
+  }
+  if (errs > 0)
+    stop(sprintf(paste0("Could not reach NCEI to check for 1-minute ASOS winds (%d request(s) ",
+                        "failed). Not falling back to hourly winds silently -- try again."), errs))
+  pipeline_env$has_aerminute <- FALSE
+  FALSE
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -217,8 +251,10 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   station_dir <- file.path(run_dir, icao)
   pipeline_env$station_dir      <- station_dir
   pipeline_env$state            <- st$state
+  pipeline_env$end_year         <- y2
   pipeline_env$tadjust_override <- met_opts$tadjust
   pipeline_env$tadjust          <- NULL
+  pipeline_env$has_aerminute    <- NULL
 
   # Note whether the met data is already local (the engine skips re-downloading
   # GHCNh / IGRA / 1-min & 5-min ASOS when the files exist), so a re-run that only
