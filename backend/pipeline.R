@@ -59,6 +59,101 @@ get_icao_from_igra <- function(ua_station_id, cache_dir = NULL) {
   paste0("UA", substr(ua_station_id, nchar(ua_station_id) - 4, nchar(ua_station_id)))
 }
 
+# ---- Seam 4: the station's own UTC -> local standard time offset -------------
+# GHCNh and IGRA are stamped in UTC.  AERMET subtracts the LOCATION keyword's
+# tadjust from each reported hour to get local standard time, positive west of
+# Greenwich; for GHCNh "the value is the same as the time zone for the station
+# (e.g., a value of 5 for the Eastern time zone)" (AERMET User's Guide 26135,
+# EPA-454/B-26-005, Sec. 3.3.4 and Appendix A p. A-8; UPPERAIR Sec. 3.4.4.1 and
+# p. A-29).  The engine writes 6 (US Central, correct for MDEQ's stations) on both
+# lines for every station.
+#
+# Both lines get the SURFACE station's value.  With upper air present AERMET 26135
+# sets its PBL clock from the upper-air tadjust (mod_pbl.f90: pblgmt2lst =
+# upgmt2lst(1)) and uses it to compute sunrise at the surface site for the
+# convective boundary layer, and it converts the 00Z/12Z sounding window with the
+# same value -- so the upper-air line must be on the surface station's clock.
+#
+# Source of the value, in order: a value the user entered; the station's own
+# 1-minute ASOS file (LST in columns 22-23, UTC in 26-27, AERMINUTE User's Guide
+# EPA-454/B-26-006 Sec. 3 Fig. 1 -- LST there is standard time all year); the
+# state, when it lies wholly in one time zone.  Otherwise stop and ask.
+
+# Standard-time offsets (hours west of UTC) for states wholly in one time zone.
+STATE_UTC_OFFSET <- c(
+  CT = 5, DC = 5, DE = 5, GA = 5, MA = 5, MD = 5, ME = 5, NC = 5, NH = 5, NJ = 5,
+  NY = 5, OH = 5, PA = 5, RI = 5, SC = 5, VA = 5, VT = 5, WV = 5,
+  AL = 6, AR = 6, IA = 6, IL = 6, LA = 6, MN = 6, MO = 6, MS = 6, OK = 6, WI = 6,
+  AZ = 7, CO = 7, MT = 7, NM = 7, UT = 7, WY = 7,
+  CA = 8, WA = 8)
+# AK FL ID IN KS KY MI ND NE NV OR SD TN TX span two zones: 1-minute file or user value.
+
+# Offset read from the station's 1-minute ASOS files (NULL if none is readable).
+lst_offset_from_1min <- function(onemin_dir) {
+  files <- sort(list.files(onemin_dir, pattern = "\\.dat$", full.names = TRUE))
+  for (f in files) {
+    ln <- tryCatch(readLines(f, n = 20, warn = FALSE), error = function(e) character(0))
+    for (l in ln) {
+      m <- regmatches(l, regexec(
+        "^\\s*\\d{5}[A-Z0-9]{4} [A-Z0-9]{3}\\d{8}(\\d{2})(\\d{2})(\\d{2})(\\d{2})", l))[[1]]
+      if (length(m) != 5 || m[3] != m[5]) next          # LST and UTC minutes must agree
+      off <- (as.integer(m[4]) - as.integer(m[2])) %% 24
+      if (off >= 4 && off <= 11) return(list(value = as.integer(off), file = basename(f)))
+    }
+  }
+  NULL
+}
+
+# Returns list(value, source, note); stops when it cannot be determined.
+resolve_tadjust <- function(station_dir, state, override = NULL) {
+  if (length(override) && !is.na(override)) {
+    v <- suppressWarnings(as.numeric(override))
+    if (is.na(v) || v != round(v) || v < 4 || v > 11)
+      stop(sprintf(paste0("UTC offset %s is not valid: enter whole hours west of UTC in ",
+                          "standard time (5 Eastern, 6 Central, 7 Mountain, 8 Pacific)."), override))
+    return(list(value = as.integer(v), source = "the value entered by the user", note = ""))
+  }
+  st_val <- if (length(state) && !is.na(state)) unname(STATE_UTC_OFFSET[state]) else NA
+  m <- if (length(station_dir)) lst_offset_from_1min(file.path(station_dir, "1min")) else NULL
+  if (!is.null(m)) {
+    note <- if (!is.na(st_val) && st_val != m$value)
+      sprintf("differs from the %d h expected for %s -- check the station's time zone", st_val, state)
+      else ""
+    return(list(value = m$value, note = note,
+                source = sprintf("the station's 1-minute ASOS file (%s)", m$file)))
+  }
+  if (!is.na(st_val))
+    return(list(value = as.integer(st_val), note = "",
+                source = sprintf("its state (%s is all in one time zone)", state)))
+  stop(sprintf(paste0("Cannot tell this station's time zone: %s spans more than one and no ",
+                      "1-minute ASOS file was available to read it from. Enter the UTC offset ",
+                      "(standard time: 5 Eastern, 6 Central, 7 Mountain, 8 Pacific) and run again."),
+               if (length(state) && !is.na(state)) state else "its state"))
+}
+
+# Replace the tadjust field of an engine LOCATION string ("<id> <lat>N    <lon>W 6 <elev>").
+.set_location_tadjust <- function(loc, tz) {
+  out <- sub("^(\\S+ \\S+N +\\S+W) 6 ", sprintf("\\1 %d ", as.integer(tz)), loc)
+  if (identical(out, loc) && as.integer(tz) != 6L)
+    stop("Could not set the UTC offset on the AERMET LOCATION line: ", loc)
+  out
+}
+
+.engine_get_station_info <- get_station_info
+get_station_info <- function(station_code, station_id, ua_station_id, cache_dir = NULL) {
+  info <- .engine_get_station_info(station_code, station_id, ua_station_id, cache_dir)
+  if (is.null(pipeline_env$state)) stop("get_station_info: run through run_full_pipeline()")
+  tz <- resolve_tadjust(pipeline_env$station_dir, pipeline_env$state,
+                        pipeline_env$tadjust_override)
+  pipeline_env$tadjust <- tz
+  for (k in c("surface", "upper_air"))
+    info[[k]]$location_string <- .set_location_tadjust(info[[k]]$location_string, tz$value)
+  (pipeline_env$progress %||% function(m, f) {})(
+    sprintf("UTC to local standard time offset (AERMET tadjust): %d h, from %s%s",
+            tz$value, tz$source, if (nzchar(tz$note)) paste0(" -- NOTE: ", tz$note) else ""), 0.3)
+  info
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -67,11 +162,16 @@ get_icao_from_igra <- function(ua_station_id, cache_dir = NULL) {
 # output_root: parent folder for the run output (a per-run subfolder is created)
 # aers_opts  : list(moisture, snow, arid, airport, zoradius, nlcd_year) or NULL
 # progress   : function(message, fraction) for a Shiny progress bar
+# met_opts   : list(tadjust) or NULL
+#                tadjust     UTC-to-LST offset in hours (NULL = from the station's
+#                            1-minute file or its state; required in split states
+#                            when there is no 1-minute file)
 #
 # Returns a list: station metadata, output_dir, zip_path, sfc_file, completeness.
 run_full_pipeline <- function(icao, y1, y2, output_root,
                               aers_opts = NULL,
-                              progress = function(m, f) {}) {
+                              progress = function(m, f) {},
+                              met_opts = NULL) {
   icao <- toupper(icao); y1 <- as.integer(y1); y2 <- as.integer(y2)
   stopifnot(y2 >= y1)
   dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
@@ -114,11 +214,15 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   pipeline_env$progress       <- progress
   pipeline_env$nlcd_cache_dir <- file.path(cache_dir, "nlcd",
                                            sprintf("%s_%s", icao, as.character(opts$nlcd_year %||% 2021)))
+  station_dir <- file.path(run_dir, icao)
+  pipeline_env$station_dir      <- station_dir
+  pipeline_env$state            <- st$state
+  pipeline_env$tadjust_override <- met_opts$tadjust
+  pipeline_env$tadjust          <- NULL
 
   # Note whether the met data is already local (the engine skips re-downloading
   # GHCNh / IGRA / 1-min & 5-min ASOS when the files exist), so a re-run that only
   # changes an AERSURFACE option (e.g. moisture) never re-fetches met data.
-  station_dir <- file.path(run_dir, icao)
   met_cached <- length(list.files(station_dir, pattern = "_GHCNh_.*\\.psv$")) > 0 ||
     (dir.exists(file.path(station_dir, "1min")) &&
        length(list.files(file.path(station_dir, "1min"), pattern = "\\.dat$")) > 0)

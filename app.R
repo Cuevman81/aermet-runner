@@ -85,6 +85,13 @@ ui <- fluidPage(
                                min = 2000, max = CUR_YEAR, step = 1)),
         column(6, numericInput("y2", "End year", value = CUR_YEAR - 1,
                                min = 2000, max = CUR_YEAR, step = 1))),
+      tags$b("AERMET options"),
+      fluidRow(
+        column(6, numericInput("tadjust", "UTC offset (h)", value = NA,
+                               min = 4, max = 11, step = 1))),
+      tags$span(class = "muted", paste(
+        "Blank UTC offset = read from the station's 1-minute ASOS file or its state",
+        "(standard time: 5 Eastern, 6 Central, 7 Mountain, 8 Pacific).")),
       tags$b("AERSURFACE options"),
       fluidRow(
         column(6, selectInput("moisture", "Surface moisture",
@@ -231,6 +238,9 @@ server <- function(input, output, session) {
     # A sectors override describes ONE airport's geometry, so it applies only to the
     # station it was entered for; the rest of a batch auto-derive from their own runways.
     sec_override <- parse_sectors(input$sectors)
+    # Likewise the UTC offset describes one station.
+    num_or_null <- function(v) if (length(v) && !is.na(v)) as.numeric(v) else NULL
+    met_override <- list(tadjust = num_or_null(input$tadjust))
     addlog(sprintf("=== Building %d station(s): %s  |  %d-%d ===",
                    length(icaos), paste(icaos, collapse = ", "), y1, y2))
     if (y2 - y1 + 1 > 5)
@@ -239,13 +249,16 @@ server <- function(input, output, session) {
     if (!is.null(sec_override) && length(icaos) > 1)
       addlog(sprintf("NOTE: sectors override applies to %s only; %s auto-derive from runway geometry.",
                      primary, paste(setdiff(icaos, primary), collapse = ", ")))
+    if (length(Filter(Negate(is.null), met_override)) && length(icaos) > 1)
+      addlog(sprintf("NOTE: UTC offset applies to %s only, not to %s.",
+                     primary, paste(setdiff(icaos, primary), collapse = ", ")))
 
     collected <- list(); n <- length(icaos)
     withProgress(message = "Building met data", value = 0, {
       for (k in seq_len(n)) {
         ic <- icaos[k]
-        opts <- base_opts
-        if (identical(ic, primary)) opts$sectors <- sec_override
+        opts <- base_opts; mopts <- NULL
+        if (identical(ic, primary)) { opts$sectors <- sec_override; mopts <- met_override }
         addlog(sprintf("--- [%d/%d] %s ---", k, n, ic))
         cb <- function(msg, frac) {
           setProgress(value = max(0, min(1, (k - 1 + frac) / n)),
@@ -253,7 +266,8 @@ server <- function(input, output, session) {
           addlog(msg)
         }
         res <- tryCatch(
-          run_full_pipeline(ic, y1, y2, output_root = input$outdir, aers_opts = opts, progress = cb),
+          run_full_pipeline(ic, y1, y2, output_root = input$outdir, aers_opts = opts, progress = cb,
+                            met_opts = mopts),
           error = function(e) { addlog(sprintf("%s FAILED: %s", ic, conditionMessage(e))); NULL })
         if (!is.null(res)) {
           addlog(sprintf("%s done (moisture %s). Output: %s", ic, res$moisture, res$output_dir))
