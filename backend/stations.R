@@ -39,20 +39,26 @@ IGRA_FWF <- readr::fwf_positions(
 }
 
 # ---- Surface ASOS stations (active US, with a valid WBAN) --------------------
+# isd-history.csv stopped updating when NCEI retired ISHD (Last-Modified 2025-08-30,
+# newest END 20250828; operating stations show END 2025-08-25..27, not 99991231).
+# So "recently active" is measured against the file's own newest END year, not
+# today's date, which would empty the list on 1 Jan 2028.  Same rule as
+# AERMET_MetGather_RSHINY's parse_isd_history().
 load_surface_stations <- function(cache_dir = "cache") {
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
   f <- .download_cached(ISD_HISTORY_URL, file.path(cache_dir, "isd-history.csv"))
-  cur <- as.integer(format(Sys.Date(), "%Y"))
   df <- suppressWarnings(readr::read_csv(f, col_types = readr::cols(.default = "c"),
                                          progress = FALSE, show_col_types = FALSE))
   names(df) <- toupper(gsub("[^A-Za-z0-9]", "_", names(df)))
-  df %>%
+  df <- df %>%
     mutate(ICAO = str_trim(ICAO), WBAN = str_trim(WBAN), USAF = str_trim(USAF),
            STATE = str_trim(STATE), CTRY = str_trim(CTRY),
            STATION_NAME = str_trim(STATION_NAME),
            LAT = suppressWarnings(as.numeric(LAT)),
            LON = suppressWarnings(as.numeric(LON)),
-           END_YR = suppressWarnings(as.integer(substr(END, 1, 4)))) %>%
+           END_YR = suppressWarnings(as.integer(substr(END, 1, 4))))
+  ref_yr <- suppressWarnings(max(df$END_YR, na.rm = TRUE))   # the file's own vintage
+  df %>%
     filter(CTRY == "US", !is.na(ICAO), nchar(ICAO) == 4,
            !is.na(WBAN), WBAN != "", WBAN != "99999",
            !is.na(STATE), STATE != "",
@@ -60,7 +66,7 @@ load_surface_stations <- function(cache_dir = "cache") {
            # files assume west longitude, so AK/HI/PR/VI runs cannot complete yet
            !(STATE %in% NON_CONUS_STATES),
            !is.na(LAT), !is.na(LON), !(LAT == 0 & LON == 0),
-           !is.na(END_YR), END_YR >= (cur - 2)) %>%
+           !is.na(END_YR), END_YR >= (ref_yr - 1)) %>%   # recently active
     arrange(ICAO, desc(END_YR)) %>% distinct(ICAO, .keep_all = TRUE) %>%
     transmute(ICAO,
               WBAN     = str_pad(WBAN, 5, "left", "0"),
