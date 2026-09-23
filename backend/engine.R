@@ -256,7 +256,7 @@ download_ghcnh <- function(station_code, wban, start_year, end_year, station_dir
 # .sfc verbatim.  At KMEI that put 50 hours of 30.16 m/s into April-May 2025 (every one
 # of them qc=2 on a 3-hourly FM12 SYNOP report); KTUP 2025 carried 25 more.
 #
-# Two independent screens are applied.  Both only ever blank a value -- the element
+# Three independent screens are applied.  All only ever blank a value -- the element
 # becomes missing for that observation and AERMET falls back to AERMINUTE or to its own
 # substitution logic.  No record is dropped and no value is altered or invented, so the
 # edit stays defensible and is fully auditable from the log written beside the file.
@@ -272,6 +272,21 @@ download_ghcnh <- function(station_code, wban, start_year, end_year, station_dir
 #      the same way across 821,424 METAR groups with zero disagreement, so only speed
 #      is screened.
 #
+#   3. Short SYNOPs.  Some ASOS sites also send short FM-12 SYNOPs that report cloud
+#      base and visibility missing (iRixhVV = "xx///") and leave the Nddff group out.
+#      NCEI's decoder then reads the next group as "cloud, direction, speed": the
+#      report's own time group at KMEI (90558 -> 58 kt from 050), station pressure at
+#      KTUP (30036 -> 36 kt "from 360"), temperature or present weather elsewhere --
+#      and also takes that group's first digit as the total sky cover.  When the wind
+#      group is really there its N is "/" (no cloud measured), so the misread group is
+#      recognisable: it starts with a digit, and it and the groups after it carry
+#      strictly increasing section-1 indicators (1snTTT 2snTdTdTd 3PoPoPoPo ... 9GGgg).
+#      Wind direction, wind speed, sky_condition and ceiling_height -- everything NCEI
+#      decoded from that group -- are blanked.  On the 18 MDEQ stations 2021-2025 this
+#      matched 110 reports (KJAN 4, KMEI 55, KMOB 6, KTUP 45), none with a METAR that
+#      agreed; the 5 short SYNOPs that did carry a wind group ("/ddff") all matched
+#      their METAR and are left alone.
+#
 # The function is idempotent: a blanked value cannot be blanked twice, so re-running
 # the pipeline over an already-filtered .psv is a no-op.
 
@@ -286,6 +301,27 @@ metar_wind_kt <- function(rem) {
   m <- regmatches(rem, regexpr("\\b(\\d{3}|VRB)\\d{2,3}(G\\d{2,3})?KT\\b", rem))
   if (!length(m)) return(NA_real_)
   suppressWarnings(as.numeric(sub("^(\\d{3}|VRB)(\\d{2,3}).*$", "\\2", m)))
+}
+
+# The group NCEI decoded as the wind (Nddff) in a short FM-12 SYNOP that has no wind
+# group, or "" for every other record.  REM carries "SYN" + 3-digit length + the report.
+ghcnh_synop_misread <- function(rem) {
+  out <- character(length(rem))
+  syn <- which(startsWith(rem, "SYN"))
+  if (!length(syn)) return(out)
+  tk <- strsplit(trimws(sub("^SYN\\d{3}", "", rem[syn])), " +")
+  out[syn] <- vapply(tk, function(g) {
+    g <- sub("=$", "", g)                       # IIiii iRixhVV <group read as Nddff> ...
+    if (length(g) < 3 || !grepl("^[0-9/]{2}///$", g[2]) || !grepl("^[1-9][0-9/]{4}$", g[3]))
+      return("")
+    s1 <- g[-(1:2)]
+    end <- which(grepl("^(222[0-9/]{2}|333|444|555)$", s1))   # next section starts
+    if (length(end)) s1 <- s1[seq_len(end[1] - 1L)]
+    ind <- suppressWarnings(as.integer(substr(s1, 1, 1)))
+    if (!all(nchar(s1) == 5L) || anyNA(ind) || any(diff(ind) <= 0)) return("")
+    g[3]
+  }, character(1), USE.NAMES = FALSE)
+  out
 }
 
 filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
@@ -315,14 +351,16 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
   i_ws  <- match("wind_speed", cols)
   i_rem <- match("REM", cols)
   i_t   <- match("DATE", cols); if (is.na(i_t)) i_t <- 3L
+  i_syn <- match(c("wind_direction", "wind_speed", "sky_condition", "ceiling_height"), cols)
+  i_syn <- i_syn[!is.na(i_syn)]      # what NCEI decodes from a SYNOP's Nddff slot
 
   tmp <- paste0(psv_file, ".qctmp")
   out <- file(tmp, "w")
   writeLines(header, out)
 
   counts <- setNames(integer(length(elem)), elem)
-  n_ws_x <- 0L
-  audit  <- list(); xaudit <- list()
+  n_ws_x <- 0L; n_syn <- 0L
+  audit  <- list(); xaudit <- list(); saudit <- list()
   nrec   <- 0L
 
   repeat {
@@ -367,6 +405,21 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
       }
     }
 
+    # --- screen 3: short SYNOPs whose wind slot holds another group ---
+    if (!is.na(i_rem) && length(i_syn)) {
+      grp <- ghcnh_synop_misread(m[, i_rem])
+      r <- which(nzchar(grp))
+      if (length(r)) r <- r[rowSums(m[r, i_syn, drop = FALSE] != "") > 0]
+      if (length(r)) {
+        n_syn <- n_syn + length(r)
+        saudit[[length(saudit) + 1L]] <- data.frame(
+          timestamp = m[r, i_t], group = grp[r],
+          values = apply(m[r, i_syn, drop = FALSE], 1L, paste, collapse = " / "),
+          stringsAsFactors = FALSE)
+        m[r, i_syn] <- ""
+      }
+    }
+
     writeLines(apply(m, 1L, paste, collapse = "|"), out)
   }
 
@@ -382,7 +435,8 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
           "",
           sprintf("Records scanned        : %d", nrec),
           sprintf("Screen 1 (NCEI flags)  : %d values rejected", sum(counts)),
-          sprintf("Screen 2 (METAR check) : %d wind speeds rejected", n_ws_x), "",
+          sprintf("Screen 2 (METAR check) : %d wind speeds rejected", n_ws_x),
+          sprintf("Screen 3 (short SYNOP) : %d reports' wind/sky values rejected", n_syn), "",
           "SCREEN 1 -- NCEI quality codes 2/6 (suspect) and 3/7 (erroneous)")
   if (length(hit)) {
     aud <- do.call(rbind, audit)
@@ -398,25 +452,39 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
     lg <- c(lg, "   Detail (timestamp | decoded m/s | METAR m/s | METAR kt):",
             sprintf("   %s | %s | %s | %s", xa$timestamp, xa$decoded, xa$metar, xa$rem_kt))
   } else lg <- c(lg, "   none")
+  lg <- c(lg, "",
+          "SCREEN 3 -- short FM-12 SYNOPs with no wind group (NCEI decoded another group as Nddff)")
+  if (n_syn) {
+    sa <- do.call(rbind, saudit)
+    lg <- c(lg, paste0("   Detail (timestamp | group read as wind | rejected ",
+                       paste(cols[i_syn], collapse = " / "), "):"),
+            sprintf("   %s | %s | %s", sa$timestamp, sa$group, sa$values))
+  } else lg <- c(lg, "   none")
 
   # The log is the audit trail for values that are no longer present in the .psv, so
   # it has to survive a re-run.  Re-processing an already-screened file rejects
   # nothing; leave the existing log as it stands rather than overwriting it with
   # zeroes and destroying the record of the first pass.
-  if (sum(counts) == 0 && n_ws_x == 0 && file.exists(log_file)) {
+  if (sum(counts) == 0 && n_ws_x == 0 && n_syn == 0 && file.exists(log_file)) {
     if (verbose)
       cat(sprintf("QC filter: %s already screened; existing log left intact\n",
                   basename(psv_file)))
     return(invisible(list(records = nrec, rejected = 0L, ws_crosscheck = 0L,
-                          by_element = integer(0), log_file = log_file)))
+                          synop_misread = 0L, by_element = integer(0), log_file = log_file)))
   }
+  # A pass that rejects something new over an already-screened file (e.g. after a new
+  # screen is added) appends to the log, so the first pass's record is kept.  Delete
+  # the log together with the .psv when the .psv itself is replaced.
+  if (file.exists(log_file))
+    lg <- c(readLines(log_file, warn = FALSE), "", strrep("=", 78),
+            "RE-SCREEN of the already-screened file: this pass blanked the values below", lg)
   writeLines(lg, log_file)
 
   if (verbose)
-    cat(sprintf("QC filter: %s -- %d records, %d flagged + %d METAR-mismatch rejected\n",
-                basename(psv_file), nrec, sum(counts), n_ws_x))
+    cat(sprintf("QC filter: %s -- %d records, %d flagged + %d METAR-mismatch + %d short-SYNOP rejected\n",
+                basename(psv_file), nrec, sum(counts), n_ws_x, n_syn))
   invisible(list(records = nrec, rejected = sum(counts), ws_crosscheck = n_ws_x,
-                 by_element = hit, log_file = log_file))
+                 synop_misread = n_syn, by_element = hit, log_file = log_file))
 }
 
 download_igra_data <- function(ua_station_id, start_year, end_year,
