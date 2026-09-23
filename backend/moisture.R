@@ -15,7 +15,9 @@ GHCND_ACCESS <- "https://www.ncei.noaa.gov/data/global-historical-climatology-ne
 annual_precip <- function(ghcn_id, cache_dir) {
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
   dest <- file.path(cache_dir, sprintf("ghcnd_%s.csv", ghcn_id))
-  .download_cached(sprintf("%s/%s.csv", GHCND_ACCESS, ghcn_id), dest, max_age_days = 90)
+  # ~11 MB for a long-record site: R's default 60 s download limit is not enough
+  .download_cached(sprintf("%s/%s.csv", GHCND_ACCESS, ghcn_id), dest, max_age_days = 90,
+                   timeout_s = 300)
   raw <- utils::read.csv(dest, colClasses = "character")
   if (!all(c("DATE", "PRCP") %in% names(raw))) return(NULL)
   d <- data.frame(
@@ -31,21 +33,29 @@ annual_precip <- function(ghcn_id, cache_dir) {
 }
 
 # Classify AERSURFACE surface moisture for the processing years.
-# Returns list(overall, per_year(df), q30, q70, climo_years, ok, note).
+# Returns list(overall, per_year(df), q30, q70, climo_years, n_climo, short_record,
+# ok, note).  EPA's test is the 30th/70th percentile of the 30-year record
+# (AERSURFACE User's Guide 26135, Sec. 3.2.8); a shorter record is used when that is
+# all there is, but it is flagged.  When the record cannot be used at all the result
+# is AVERAGE with ok = FALSE and a note saying so -- never a quiet default.
 classify_moisture <- function(years, ghcn_id, cache_dir, climo_n = 30) {
-  ap <- tryCatch(annual_precip(ghcn_id, cache_dir), error = function(e) NULL)
+  defaulted <- function(why)
+    list(overall = "AVERAGE", ok = FALSE,
+         note = sprintf("could not classify (%s); DEFAULTED to AVERAGE -- set surface moisture by hand", why))
+  ap <- tryCatch(annual_precip(ghcn_id, cache_dir), error = function(e) e)
+  if (inherits(ap, "error")) return(defaulted(conditionMessage(ap)))
   if (is.null(ap) || nrow(ap) == 0)
-    return(list(overall = "AVERAGE", ok = FALSE,
-                note = "no GHCN-Daily precipitation record; defaulting to AVERAGE"))
+    return(defaulted(sprintf("GHCN-Daily file for %s has no precipitation (PRCP) data", ghcn_id)))
 
   complete <- ap[ap$ndays >= 350, ]
   cur_year <- as.integer(format(Sys.Date(), "%Y"))
   complete <- complete[complete$year < cur_year, ]          # drop partial current year
   if (nrow(complete) < 10)
-    return(list(overall = "AVERAGE", ok = FALSE,
-                note = "too few complete precipitation years; defaulting to AVERAGE"))
+    return(defaulted(sprintf("only %d complete precipitation year(s) at %s; at least 10 needed",
+                             nrow(complete), ghcn_id)))
 
   climo <- tail(complete[order(complete$year), ], climo_n)   # most recent N complete years
+  short <- nrow(climo) < climo_n
   q30 <- as.numeric(quantile(climo$precip_in, 0.30))
   q70 <- as.numeric(quantile(climo$precip_in, 0.70))
   cls <- function(p) if (is.na(p)) NA_character_ else if (p <= q30) "DRY" else if (p >= q70) "WET" else "AVERAGE"
@@ -71,13 +81,16 @@ classify_moisture <- function(years, ghcn_id, cache_dir, climo_n = 30) {
   mean_p  <- if (nrow(usable)) mean(usable$precip_in, na.rm = TRUE) else NA_real_
   overall <- cls(mean_p); if (is.na(overall)) overall <- "AVERAGE"
 
-  note <- sprintf("30-yr climatology %d-%d: dry<=%.1f in, wet>=%.1f in",
-                  min(climo$year), max(climo$year), q30, q70)
+  note <- sprintf("%d-yr climatology %d-%d: dry<=%.1f in, wet>=%.1f in",
+                  nrow(climo), min(climo$year), max(climo$year), q30, q70)
+  if (short)
+    note <- sprintf("%s; SHORT RECORD -- only %d complete years (EPA compares against 30)",
+                    note, nrow(climo))
   if (length(partial))
     note <- sprintf("%s; incomplete precip record excluded for %s", note,
                     paste(partial, collapse = ", "))
 
   list(overall = overall, per_year = per_year, q30 = round(q30, 1), q70 = round(q70, 1),
-       climo_years = range(climo$year), mean_p = round(mean_p, 1), ok = TRUE,
-       partial_years = partial, note = note)
+       climo_years = range(climo$year), n_climo = nrow(climo), short_record = short,
+       mean_p = round(mean_p, 1), ok = TRUE, partial_years = partial, note = note)
 }

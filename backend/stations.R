@@ -20,14 +20,19 @@ IGRA_FWF <- readr::fwf_positions(
   col_names = c("IGRA_ID", "LAT", "LON", "ELEV", "STATE", "STATION_NAME",
                 "FIRST_YEAR", "LAST_YEAR", "NUM_RECORDS"))
 
-.download_cached <- function(url, dest, max_age_days = 30) {
+.download_cached <- function(url, dest, max_age_days = 30, timeout_s = 120) {
   if (file.exists(dest) &&
       difftime(Sys.time(), file.info(dest)$mtime, units = "days") < max_age_days &&
       file.info(dest)$size > 0) return(dest)
-  ok <- tryCatch({ utils::download.file(url, dest, mode = "wb", quiet = TRUE); TRUE },
-                 error = function(e) FALSE)
+  old <- options(timeout = max(timeout_s, getOption("timeout"))); on.exit(options(old))
+  err <- character(0)                      # keep the reason, so callers can report it
+  ok <- tryCatch(withCallingHandlers(
+          { utils::download.file(url, dest, mode = "wb", quiet = TRUE); TRUE },
+          warning = function(w) { err <<- c(err, conditionMessage(w)); invokeRestart("muffleWarning") }),
+        error = function(e) { err <<- c(err, conditionMessage(e)); FALSE })
   if (!ok || !file.exists(dest) || file.info(dest)$size == 0)
-    stop(sprintf("Download failed: %s", url))
+    stop(sprintf("Download failed: %s%s", url,
+                 if (length(err)) paste0(" (", paste(unique(err), collapse = "; "), ")") else ""))
   dest
 }
 
