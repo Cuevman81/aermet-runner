@@ -74,9 +74,14 @@ season_defaults <- function(lat) {
 }
 
 # Default AERSURFACE options for a site (user may override the moisture/snow/arid).
+# Continuous snow cover is a property of the site's record -- "a calendar month
+# during which the ground was covered with snow more than 50% of the time"
+# (AERSURFACE User's Guide 26135, EPA-454/B-26-007, Sec. 3.2.8) -- not of latitude:
+# Seattle and Portland sit north of 45N and rarely keep snow on the ground.  So it
+# is off unless the user says otherwise (the app's checkbox always did this).
 default_aersurface_opts <- function(lat) {
   list(moisture = "AVERAGE",           # DRY | AVERAGE | WET
-       snow     = (abs(lat) >= 45),    # continuous winter snow?
+       snow     = FALSE,               # continuous winter snow? (user decision)
        arid     = FALSE,               # arid climate?
        airport  = TRUE,                # treat the site sector as an airport
        zoradius = 1.0,                 # roughness radius (km)
@@ -90,7 +95,10 @@ default_aersurface_opts <- function(lat) {
   clim <- sprintf("CLIMATE %s %s %s", toupper(opts$moisture),
                   if (isTRUE(opts$snow)) "SNOW" else "NOSNOW",
                   if (isTRUE(opts$arid)) "ARID" else "NONARID")
-  winter_kw <- if (isTRUE(opts$snow)) "WINTERSN" else "WINTERNS"
+  # AERSURFACE's season keywords are WINTERNS (no snow) and WINTERWS (continuous
+  # snow) -- User's Guide 26135 Table 3-2.  Anything else is an invalid keyword and
+  # AERSURFACE aborts without writing a surface-characteristics file.
+  winter_kw <- if (isTRUE(opts$snow)) "WINTERWS" else "WINTERNS"
   freq <- sprintf("FREQ_SECT MONTHLY %d VARYAP", nrow(sectors))
   sect_lines <- sprintf("   SECTOR %d %.1f %.1f %s", seq_len(nrow(sectors)),
                         sectors$start, sectors$end, sectors$type)
@@ -171,6 +179,10 @@ run_aersurface <- function(icao, name, lat, lon, aers_dir, app_root,
                            opts = NULL, nlcd_cache_dir = NULL,
                            progress = function(m, f) {}) {
   if (is.null(opts)) opts <- default_aersurface_opts(lat)
+  # "AERSURFACE will abort processing and report an error if the secondary keywords
+  # SNOW and ARID are used in combination" (User's Guide 26135, Sec. 3.2.8).
+  if (isTRUE(opts$snow) && isTRUE(opts$arid))
+    stop("Continuous winter snow and Arid climate cannot both be set: AERSURFACE rejects that combination.")
   input_dir <- file.path(aers_dir, "input")
   dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
 
