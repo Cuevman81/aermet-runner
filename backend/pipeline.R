@@ -279,6 +279,32 @@ register_run_station <- function(icao, st) {
   invisible(TRUE)
 }
 
+# QA rows stating the run settings a reviewer will ask about, and where each came from.
+.qa_settings <- function(opts, mi) {
+  grp <- "Run settings"
+  tz  <- pipeline_env$tadjust
+  list(
+    .qa_chk(grp, "UTC to local standard time offset (AERMET tadjust)",
+      if (is.null(tz) || nzchar(tz$note)) "warn" else "info",
+      if (is.null(tz)) "not recorded"
+      else sprintf("%d h on both LOCATION lines, from %s%s", tz$value, tz$source,
+                   if (nzchar(tz$note)) paste0(" -- ", tz$note) else "")),
+    .qa_chk(grp, "Anemometer height (NWS_HGT WIND)", "info",
+      sprintf("%.2f m -- %s%s", pipeline_env$anem_height, .anem_text(),
+              if (isTRUE(pipeline_env$anem_entered)) ""
+              else "; ASOS anemometers are typically 10.1 or 7.9 m (AERMET User's Guide 3.7.5)")),
+    if (is.null(mi))
+      .qa_chk(grp, "Surface moisture", "info",
+              sprintf("%s -- set by the user", toupper(opts$moisture %||% "AVERAGE")))
+    else
+      .qa_chk(grp, "Surface moisture from the site's rainfall record",
+              if (isTRUE(mi$ok) && !isTRUE(mi$short_record)) "pass" else "warn",
+              sprintf("%s -- %s", mi$overall, mi$note)),
+    .qa_chk(grp, "Continuous winter snow cover", "info",
+            if (isTRUE(opts$snow)) "SNOW (winter months treated as snow-covered) -- set by the user"
+            else "NOSNOW -- tick the option only if the ground was snow-covered more than half of each winter month"))
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -378,7 +404,8 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   # --- Post-run QA: prove AERSURFACE + AERMET ran correctly and the data is sound
   progress("Running QA checks ...", 0.95)
   aers_dir <- file.path(paths$station_dir, "aersurface")
-  qa <- tryCatch(qa_run(paths$station_dir, aers_dir, icao, y1, y2),
+  qa <- tryCatch(qa_run(paths$station_dir, aers_dir, icao, y1, y2,
+                        settings = .qa_settings(opts, moisture_info)),
                  error = function(e) list(overall = "WARN",
                    checks = list(list(group = "QA", label = "QA checks",
                      status = "warn", detail = conditionMessage(e))),
@@ -414,6 +441,7 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
        zip_path = if (is.na(zip_path)) NA else normalizePath(zip_path),
        missing_asos_months = missing,
        moisture = opts$moisture, moisture_info = moisture_info,
+       tadjust = pipeline_env$tadjust, has_aerminute = pipeline_env$has_aerminute,
        qa = qa,
        icao = icao, years = c(y1, y2))
 }

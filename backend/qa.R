@@ -282,9 +282,12 @@ qa_completeness <- function(station_dir, icao, y1, y2) {
 }
 
 # --- Top level ----------------------------------------------------------------
-qa_run <- function(station_dir, aers_dir, icao, y1, y2) {
+# settings: optional list of .qa_chk rows describing the run's own inputs (UTC
+# offset, anemometer height, moisture basis), built by the pipeline.
+qa_run <- function(station_dir, aers_dir, icao, y1, y2, settings = NULL) {
   icao <- toupper(icao)
-  checks <- c(qa_aersurface(aers_dir, icao),
+  checks <- c(Filter(Negate(is.null), settings),
+              qa_aersurface(aers_dir, icao),
               qa_aermet(station_dir, icao, y1, y2),
               qa_completeness(station_dir, icao, y1, y2))
   worst <- max(vapply(checks, function(c) .qa_status_rank[[c$status]], numeric(1)))
