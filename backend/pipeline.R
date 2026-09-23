@@ -37,7 +37,11 @@ fetch_aersurface_file <- function(station_code, root_directory, start_year, end_
                         aers_dir = aers_dir, app_root = ctx$app_root,
                         opts = ctx$aers_opts, nlcd_cache_dir = ctx$nlcd_cache_dir,
                         progress = ctx$progress %||% function(m, f) {})
-  dest_name <- basename(sfc)
+  # Deliver it under the name the engine's verification report and met report PDF
+  # look for (<id>_<nlcd year>_aers_sfc.txt, as in MDEQ production); under any other
+  # name both documents say "AERSURFACE file not found" and omit the monthly table.
+  dest_name <- sprintf("%s_%s_aers_sfc.txt", tolower(station_code),
+                       as.character(ctx$aers_opts$nlcd_year %||% 2021))
   dest <- file.path(root_directory, station_code, dest_name)
   file.copy(sfc, dest, overwrite = TRUE)
   dest_name
@@ -201,6 +205,53 @@ create_stage2_content <- function(...) {
   x
 }
 
+# ---- Seam 7: the verification report describes THIS run ----------------------
+.engine_generate_verification_report <- generate_verification_report
+generate_verification_report <- function(results, station_code, start_year, end_year) {
+  rc <- .engine_generate_verification_report(results, station_code, start_year, end_year)
+  rc0 <- rc
+  i <- grep("^   Wind reference ht ", rc)[1]
+  if (!is.na(i)) {
+    rc[i] <- paste0(rc[i], "  -- ", .anem_text())
+    tz <- pipeline_env$tadjust
+    if (!is.null(tz))
+      rc <- append(rc, sprintf("   UTC to LST offset    %d h   -- AERMET tadjust, from %s",
+                               tz$value, tz$source), after = i + 1L)
+  }
+  if (isFALSE(pipeline_env$has_aerminute)) {
+    j <- grep("^   1-minute winds ", rc)[1]
+    if (!is.na(j))
+      rc[j:(j + 1L)] <- c(
+        "   1-minute winds       NOT USED -- NCEI has no 1-minute ASOS archive for this",
+        "                        station and period; winds are the hourly GHCNh reports")
+  }
+  if (!identical(rc, rc0))
+    writeLines(rc, file.path(results$station_dir,
+                             sprintf("%s_verification_report.txt", station_code)))
+  rc
+}
+
+.anem_text <- function() {
+  if (isTRUE(pipeline_env$anem_entered))
+    sprintf("NWS_HGT %.2f m entered by the user", pipeline_env$anem_height)
+  else "NWS_HGT default 10 m, not verified for this station"
+}
+
+# ---- The engine's report and PDF look stations up in STATION_REGISTRY ---------
+# That table holds MDEQ's 18 stations and their production upper-air pairings.
+# Record the station and upper-air site THIS run used, so both documents describe
+# them (the app pairs some MDEQ stations differently, e.g. KTUP -> Birmingham).
+register_run_station <- function(icao, st) {
+  env <- environment(process_aermet_complete)
+  reg <- get("STATION_REGISTRY", envir = env)
+  reg <- reg[reg$code != icao, , drop = FALSE]
+  assign("STATION_REGISTRY",
+         rbind(reg, data.frame(code = icao, station_id = st$station_id,
+                               ua_station_id = st$ua_station_id, stringsAsFactors = FALSE)),
+         envir = env)
+  invisible(TRUE)
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -274,6 +325,7 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   pipeline_env$has_aerminute    <- NULL
   pipeline_env$anem_entered     <- length(anem) > 0 && !is.na(anem)
   pipeline_env$anem_height      <- if (pipeline_env$anem_entered) as.numeric(anem) else 10
+  register_run_station(icao, st)
 
   # Note whether the met data is already local (the engine skips re-downloading
   # GHCNh / IGRA / 1-min & 5-min ASOS when the files exist), so a re-run that only
