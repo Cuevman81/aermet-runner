@@ -188,6 +188,19 @@ check_aerminute_availability <- function(station_code, year, month) {
   FALSE
 }
 
+# ---- Seam 6: anemometer height ------------------------------------------------
+# The engine writes NWS_HGT WIND 10.00 for every station.  ASOS anemometers are
+# "typically 10.1 meters or 7.9 meters" and the user "should consult a reference
+# ... to obtain the correct height" (AERMET User's Guide 26135, Sec. 3.7.5).
+.engine_create_stage2_content <- create_stage2_content
+create_stage2_content <- function(...) {
+  x <- .engine_create_stage2_content(...)
+  h <- pipeline_env$anem_height
+  if (length(h) && !is.na(h))
+    x <- sub("^(\\s*NWS_HGT\\s+WIND\\s+)[0-9.]+", sprintf("\\1%.2f", h), x)
+  x
+}
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -196,10 +209,11 @@ check_aerminute_availability <- function(station_code, year, month) {
 # output_root: parent folder for the run output (a per-run subfolder is created)
 # aers_opts  : list(moisture, snow, arid, airport, zoradius, nlcd_year) or NULL
 # progress   : function(message, fraction) for a Shiny progress bar
-# met_opts   : list(tadjust) or NULL
+# met_opts   : list(tadjust, anem_height) or NULL
 #                tadjust     UTC-to-LST offset in hours (NULL = from the station's
 #                            1-minute file or its state; required in split states
 #                            when there is no 1-minute file)
+#                anem_height anemometer height in m (NULL = 10 m)
 #
 # Returns a list: station metadata, output_dir, zip_path, sfc_file, completeness.
 run_full_pipeline <- function(icao, y1, y2, output_root,
@@ -208,6 +222,9 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
                               met_opts = NULL) {
   icao <- toupper(icao); y1 <- as.integer(y1); y2 <- as.integer(y2)
   stopifnot(y2 >= y1)
+  anem <- met_opts$anem_height
+  if (length(anem) && !is.na(anem) && (!is.numeric(anem) || anem < 1 || anem > 50))
+    stop(sprintf("Anemometer height %s m is not plausible (expected 1-50 m).", anem))
   dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
   cache_dir <- file.path(output_root, "cache")
 
@@ -255,6 +272,8 @@ run_full_pipeline <- function(icao, y1, y2, output_root,
   pipeline_env$tadjust_override <- met_opts$tadjust
   pipeline_env$tadjust          <- NULL
   pipeline_env$has_aerminute    <- NULL
+  pipeline_env$anem_entered     <- length(anem) > 0 && !is.na(anem)
+  pipeline_env$anem_height      <- if (pipeline_env$anem_entered) as.numeric(anem) else 10
 
   # Note whether the met data is already local (the engine skips re-downloading
   # GHCNh / IGRA / 1-min & 5-min ASOS when the files exist), so a re-run that only

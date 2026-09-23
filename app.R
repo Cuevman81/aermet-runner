@@ -88,10 +88,13 @@ ui <- fluidPage(
       tags$b("AERMET options"),
       fluidRow(
         column(6, numericInput("tadjust", "UTC offset (h)", value = NA,
-                               min = 4, max = 11, step = 1))),
+                               min = 4, max = 11, step = 1)),
+        column(6, numericInput("anem", "Anemometer height (m)", value = NA,
+                               min = 1, max = 50, step = 0.1))),
       tags$span(class = "muted", paste(
         "Blank UTC offset = read from the station's 1-minute ASOS file or its state",
-        "(standard time: 5 Eastern, 6 Central, 7 Mountain, 8 Pacific).")),
+        "(standard time: 5 Eastern, 6 Central, 7 Mountain, 8 Pacific). Blank height = 10 m;",
+        "enter the station's actual height (ASOS is typically 10.1 or 7.9 m).")),
       tags$b("AERSURFACE options"),
       fluidRow(
         column(6, selectInput("moisture", "Surface moisture",
@@ -238,9 +241,9 @@ server <- function(input, output, session) {
     # A sectors override describes ONE airport's geometry, so it applies only to the
     # station it was entered for; the rest of a batch auto-derive from their own runways.
     sec_override <- parse_sectors(input$sectors)
-    # Likewise the UTC offset describes one station.
+    # Likewise the UTC offset and anemometer height describe one station.
     num_or_null <- function(v) if (length(v) && !is.na(v)) as.numeric(v) else NULL
-    met_override <- list(tadjust = num_or_null(input$tadjust))
+    met_override <- list(tadjust = num_or_null(input$tadjust), anem_height = num_or_null(input$anem))
     addlog(sprintf("=== Building %d station(s): %s  |  %d-%d ===",
                    length(icaos), paste(icaos, collapse = ", "), y1, y2))
     if (y2 - y1 + 1 > 5)
@@ -250,7 +253,7 @@ server <- function(input, output, session) {
       addlog(sprintf("NOTE: sectors override applies to %s only; %s auto-derive from runway geometry.",
                      primary, paste(setdiff(icaos, primary), collapse = ", ")))
     if (length(Filter(Negate(is.null), met_override)) && length(icaos) > 1)
-      addlog(sprintf("NOTE: UTC offset applies to %s only, not to %s.",
+      addlog(sprintf("NOTE: UTC offset / anemometer height apply to %s only, not to %s.",
                      primary, paste(setdiff(icaos, primary), collapse = ", ")))
 
     collected <- list(); n <- length(icaos)
