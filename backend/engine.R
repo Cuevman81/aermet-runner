@@ -269,10 +269,11 @@ download_ghcnh <- function(station_code, wban, start_year, end_year, station_dir
 # .sfc verbatim.  At KMEI that put 50 hours of 30.16 m/s into April-May 2025 (every one
 # of them qc=2 on a 3-hourly FM12 SYNOP report); KTUP 2025 carried 25 more.
 #
-# Three independent screens are applied.  All only ever blank a value -- the element
-# becomes missing for that observation and AERMET falls back to AERMINUTE or to its own
+# Three independent screens are applied.  They only ever blank -- the element becomes
+# missing for that observation and AERMET falls back to AERMINUTE or to its own
 # substitution logic.  No record is dropped and no value is altered or invented, so the
 # edit stays defensible and is fully auditable from the log written beside the file.
+# Screens 1 and 2 blank the value; screen 3 has to blank more (see below).
 #
 #   1. Quality codes.  ISD/GHCNh codes 2 and 6 mean "suspect", 3 and 7 "erroneous";
 #      0/1/4/5/9 and blank pass.  Applied to every element carrying a *_Quality_Code.
@@ -295,7 +296,12 @@ download_ghcnh <- function(station_code, wban, start_year, end_year, station_dir
 #      recognisable: it starts with a digit, and it and the groups after it carry
 #      strictly increasing section-1 indicators (1snTTT 2snTdTdTd 3PoPoPoPo ... 9GGgg).
 #      Wind direction, wind speed, sky_condition and ceiling_height -- everything NCEI
-#      decoded from that group -- are blanked.  On the 18 MDEQ stations 2021-2025 this
+#      decoded from that group -- are removed WHOLE (value, measurement and quality
+#      codes, report type, source), and so is the REM text: AERMET 26135 re-reads cloud
+#      cover from a SYN report's REM when the sky fields are empty, and takes a missing
+#      wind direction with measurement code "C" as calm, so blanking the values alone
+#      left both errors in place.  The REM text is kept in the QC log.  On the 18 MDEQ
+#      stations 2021-2025 this
 #      matched 110 reports (KJAN 4, KMEI 55, KMOB 6, KTUP 45), none with a METAR that
 #      agreed; the 5 short SYNOPs that did carry a wind group ("/ddff") all matched
 #      their METAR and are left alone.
