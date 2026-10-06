@@ -366,6 +366,14 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
   i_t   <- match("DATE", cols); if (is.na(i_t)) i_t <- 3L
   i_syn <- match(c("wind_direction", "wind_speed", "sky_condition", "ceiling_height"), cols)
   i_syn <- i_syn[!is.na(i_syn)]      # what NCEI decodes from a SYNOP's Nddff slot
+  # ...and every column that belongs to those elements (codes, report type, source).
+  # AERMET 26135 reads more than the value: a wind direction whose value is missing
+  # but whose Measurement_Code is "C" is taken as CALM (mod_surface.f90, GHCN
+  # reader), so a rejected element has to be removed whole.  KMEI 2025-03-27 15Z
+  # ("705//" read as wind) stayed a calm hour until this was done.
+  i_syn_all <- which(cols %in% cols[i_syn] |
+                     Reduce(`|`, lapply(paste0(cols[i_syn], "_"), startsWith, x = cols)))
+  i_rtype <- grep("_Report_Type$", cols)
 
   tmp <- paste0(psv_file, ".qctmp")
   out <- file(tmp, "w")
@@ -430,13 +438,27 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
     if (!is.na(i_rem) && length(i_syn)) {
       grp <- ghcnh_synop_misread(m[, i_rem])
       r <- which(nzchar(grp))
+      # Rows rejected by an earlier pass that blanked only the values and the REM:
+      # an FM12 row with no REM text but element columns still filled.  NCEI fills
+      # REM on every report, so an FM12 row without it is one this screen emptied.
+      fm12 <- if (length(i_rtype)) rowSums(m[, i_rtype, drop = FALSE] == "FM12") > 0 else FALSE
+      prev <- which(!nzchar(m[, i_rem]) & fm12 &
+                    rowSums(m[, i_syn_all, drop = FALSE] != "") > 0)
+      prev <- setdiff(prev, r)
       if (length(r)) {
         n_syn <- n_syn + length(r)
         saudit[[length(saudit) + 1L]] <- data.frame(
           timestamp = m[r, i_t], group = grp[r],
           values = apply(m[r, i_syn, drop = FALSE], 1L, paste, collapse = " / "),
           rem = m[r, i_rem], stringsAsFactors = FALSE)
-        m[r, c(i_syn, i_rem)] <- ""
+        m[r, c(i_syn_all, i_rem)] <- ""
+      }
+      if (length(prev)) {
+        n_syn <- n_syn + length(prev)
+        saudit[[length(saudit) + 1L]] <- data.frame(
+          timestamp = m[prev, i_t], group = "(earlier pass)",
+          values = "codes left by an earlier pass removed", rem = "", stringsAsFactors = FALSE)
+        m[prev, i_syn_all] <- ""
       }
     }
 

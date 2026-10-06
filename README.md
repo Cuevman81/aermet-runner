@@ -453,7 +453,12 @@ The final year of a window also has no observations after 23:59 UTC on 31 Decemb
   reader falls back to the raw report in `REM` and reads the first digit of a
   SYNOP's third group as total cloud, which is the very group NCEI misread. The
   original text is kept in the QC log. A file screened by v1.4 is completed on the
-  next pass. Wind was never affected; AERMET does not read wind from `REM`.
+  next pass.
+- **Screen 3 removes a rejected element whole**: value, measurement code, quality
+  code, report type and source. AERMET 26135 takes a wind direction whose value is
+  missing but whose measurement code is `C` as **calm**, so the bogus calm that a
+  short SYNOP's `705//` group produced (KMEI 2025-03-27 15Z) survived blanking the
+  values alone.
 - Screen 3 is now also in MDEQ's production `AERMET.R`; `backend/engine.R` is
   again a verbatim copy of it.
 
