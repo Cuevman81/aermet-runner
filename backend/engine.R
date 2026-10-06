@@ -416,17 +416,24 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
     }
 
     # --- screen 3: short SYNOPs whose wind slot holds another group ---
+    # The REM text is blanked too.  When a report's decoded sky fields are empty,
+    # AERMET 26135 (mod_surface.f90, GHCN reader) falls back to the raw report in
+    # REM and, for a SYN report, reads the first digit of its THIRD token as total
+    # cloud in oktas -- the same group NCEI misread -- so blanking sky_condition
+    # alone left the bad cloud cover in place (seen at KJAN 2021-08-20: 4/10 back).
+    # The full original text is kept in the QC log.  A row is selected while its
+    # REM still holds the short SYNOP, so a file screened before this change is
+    # completed on the next pass and an already-completed file is left alone.
     if (!is.na(i_rem) && length(i_syn)) {
       grp <- ghcnh_synop_misread(m[, i_rem])
       r <- which(nzchar(grp))
-      if (length(r)) r <- r[rowSums(m[r, i_syn, drop = FALSE] != "") > 0]
       if (length(r)) {
         n_syn <- n_syn + length(r)
         saudit[[length(saudit) + 1L]] <- data.frame(
           timestamp = m[r, i_t], group = grp[r],
           values = apply(m[r, i_syn, drop = FALSE], 1L, paste, collapse = " / "),
-          stringsAsFactors = FALSE)
-        m[r, i_syn] <- ""
+          rem = m[r, i_rem], stringsAsFactors = FALSE)
+        m[r, c(i_syn, i_rem)] <- ""
       }
     }
 
@@ -446,7 +453,7 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
           sprintf("Records scanned        : %d", nrec),
           sprintf("Screen 1 (NCEI flags)  : %d values rejected", sum(counts)),
           sprintf("Screen 2 (METAR check) : %d wind speeds rejected", n_ws_x),
-          sprintf("Screen 3 (short SYNOP) : %d reports' wind/sky values rejected", n_syn), "",
+          sprintf("Screen 3 (short SYNOP) : %d reports' wind/sky values and SYNOP text rejected", n_syn), "",
           "SCREEN 1 -- NCEI quality codes 2/6 (suspect) and 3/7 (erroneous)")
   if (length(hit)) {
     aud <- do.call(rbind, audit)
@@ -467,8 +474,8 @@ filter_ghcnh_quality <- function(psv_file, log_file = NULL, chunk = 20000L,
   if (n_syn) {
     sa <- do.call(rbind, saudit)
     lg <- c(lg, paste0("   Detail (timestamp | group read as wind | rejected ",
-                       paste(cols[i_syn], collapse = " / "), "):"),
-            sprintf("   %s | %s | %s", sa$timestamp, sa$group, sa$values))
+                       paste(cols[i_syn], collapse = " / "), " | original REM):"),
+            sprintf("   %s | %s | %s | %s", sa$timestamp, sa$group, sa$values, sa$rem))
   } else lg <- c(lg, "   none")
 
   # The log is the audit trail for values that are no longer present in the .psv, so

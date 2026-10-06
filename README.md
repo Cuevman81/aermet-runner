@@ -446,8 +446,14 @@ The final year of a window also has no observations after 23:59 UTC on 31 Decemb
   set, and agrees on every one. On that set it moved 15 quarters below 90%; the
   usual cause is a missing morning sounding (no convective mixing height that day).
 - **Mac binaries** are native Apple silicon builds (see *Platform support*).
-- The SYNOP screen (screen 3) that v1.4 added to this engine is now also in
-  MDEQ's production `AERMET.R`; `backend/engine.R` is again a verbatim copy of it.
+- **Screen 3 now also blanks the SYNOP text (`REM`).** Blanking the decoded sky
+  value was not enough: when a report's sky fields are empty, AERMET 26135's GHCNh
+  reader falls back to the raw report in `REM` and reads the first digit of a
+  SYNOP's third group as total cloud, which is the very group NCEI misread. The
+  original text is kept in the QC log. A file screened by v1.4 is completed on the
+  next pass. Wind was never affected; AERMET does not read wind from `REM`.
+- Screen 3 is now also in MDEQ's production `AERMET.R`; `backend/engine.R` is
+  again a verbatim copy of it.
 
 ## AERSURFACE options
 
