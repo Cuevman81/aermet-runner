@@ -367,9 +367,11 @@ to defend the data, not just what the pipeline happened to compute:
 
 ### Using the yearly files in AERMOD
 
-Since v1.5 each yearly `.sfc`/`.pfl` holds **calendar-year records only**
-(Stage 2 `XDATES y/01/01 TO y/12/31`), so yearly files can be joined end to end
-into one multi-year file and run without `STARTEND`.
+Since v1.5 each yearly `.sfc`/`.pfl` holds **calendar-year records only**, so
+yearly files can be joined end to end into one multi-year file and run without
+`STARTEND`. Stage 2 still runs `XDATES y/01/01 TO y+1/01/01` so that AERMET can
+fill a missing temperature or cloud cover late on 31 December from the next
+day's observation; the trailing day is trimmed off afterwards.
 
 Files made with v1.4 or earlier (and MDEQ packages published before October 2026)
 end with the 24 hours of 1 January of the following year. AERMOD does **not** skip
@@ -430,12 +432,12 @@ The final year of a window also has no observations after 23:59 UTC on 31 Decemb
 
 ### v1.5 corrections (2026-10-06)
 
-- **Calendar-year files.** Stage 2 now ends each year on 31 December (it ended on
-  1 January of the next year; see *Using the yearly files in AERMOD*). Stage 1
-  still extracts through the day after the window, because the last local hours
-  of 31 December need 1 January UTC observations. Re-running a year with the new
-  window gives output byte-identical to the calendar-year records of the old one
-  (checked on KTUP 2025).
+- **Calendar-year files.** The 24 records of 1 January of the following year are
+  trimmed off each yearly `.sfc`/`.pfl` after AERMET finishes (see *Using the
+  yearly files in AERMOD*). The trimmed records are byte-identical to what AERMET
+  wrote. Ending Stage 2's `XDATES` on 31 December instead looks equivalent but is
+  not: AERMET then cannot substitute a missing value late on 31 December from the
+  next day, and an hour that was filled becomes missing (seen at KPIB 2024).
 - **Completeness is counted the way AERMOD counts it.** An hour used to count as
   missing only when wind speed, direction or temperature was missing. AERMOD 26135
   (`metext.f`: `CHKCLM`, then `CHKMSG`) also loses every hour without a usable L,

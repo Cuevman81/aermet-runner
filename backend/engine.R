@@ -19,11 +19,14 @@
 # Previous ISHD-based version preserved as AERMET_24142_backup.R
 #
 # 2026-10-06 (review patch, not yet adopted):
-#   * Stage 2 XDATES now ends <y>/12/31, so each yearly .sfc/.pfl holds calendar-year
-#     records only.  It used to end <y+1>/01/01, which appended the 24 hours of
-#     1 January of the following year; joining yearly files then failed in AERMOD
-#     with MX E450 (record out of sequence).  Verified on KTUP 2025: the trimmed
-#     output is byte-identical to the calendar-year records of the old output.
+#   * Each yearly .sfc/.pfl now holds calendar-year records only.  Stage 2 still runs
+#     XDATES <y>/01/01 TO <y+1>/01/01, so AERMET can substitute a missing temperature
+#     or cloud cover late on 31 December from the 1 January observation that follows
+#     it; the trailing day is then trimmed off the output files.  Ending XDATES on
+#     <y>/12/31 instead was tried and is NOT neutral: KPIB 2024 31 Dec hour 24 lost
+#     its substituted temperature and became a missing hour.  The trailing day used
+#     to be left in the files; joining yearly files then failed in AERMOD with
+#     MX E450 (record out of sequence).
 #   * verify_data_completeness() counts missing hours exactly as AERMOD 26135 does
 #     (metext.f CHKCLM then CHKMSG), verified against AERMOD itself for all 360
 #     station-quarters of the 2021-2025 set.
@@ -815,10 +818,11 @@ create_stage2_content <- function(year, use_ustar, aersurf_file, station_code,
     "   MODEL       AERMOD",
     sprintf("   OUTPUT      %s%d%s.sfc", station_code, year, suffix),
     sprintf("   PROFILE     %s%d%s.pfl", station_code, year, suffix),
-    # Calendar year only.  Stage 1 still extracts through <end+1>/01/01, because the
-    # last local-standard-time hours of 31 December need 1 January UTC observations;
-    # Stage 2 must not write those hours out as data.
-    sprintf("   XDATES      %d/01/01 TO %d/12/31", year, year),
+    # Runs into 1 January of the following year on purpose: AERMET's temperature and
+    # cloud-cover substitution interpolates across a gap, so a missing value late on
+    # 31 December needs the next day's observation.  The extra day is trimmed off the
+    # .sfc/.pfl by trim_to_calendar_year() once AERMET has finished.
+    sprintf("   XDATES      %d/01/01 TO %d/01/01", year, year + 1),
     "   METHOD      REFLEVEL  SUBNWS",
     "   METHOD      WIND_DIR  RANDOM")
   if (use_ustar) content <- c(content, "   METHOD      STABLEBL  ADJ_U*")
@@ -829,6 +833,24 @@ create_stage2_content <- function(year, use_ustar, aersurf_file, station_code,
     "   NWS_HGT     WIND 10.00",
     "** Primary Surface Characteristics (AERSURFACE 26135)",
     sprintf("   AERSURF   %s", aersurf_file))
+}
+
+# Keep only the records of `year` in an AERMET .sfc (one header line) or .pfl.
+# Lines are copied verbatim, so the calendar-year records are byte-identical to what
+# AERMET wrote.  Idempotent.
+trim_to_calendar_year <- function(path, year, header) {
+  ln <- readLines(path, warn = FALSE)
+  h  <- if (header) ln[1] else character(0)
+  d  <- if (header) ln[-1] else ln
+  yr <- suppressWarnings(as.integer(sub("^\\s*(\\d+).*$", "\\1", d)))
+  yr <- ifelse(!is.na(yr) & yr < 100, yr + 2000L, yr)
+  keep <- !is.na(yr) & yr == year
+  if (!any(keep)) stop(sprintf("%s holds no records for %d", basename(path), year))
+  if (all(keep)) return(invisible(0L))
+  tmp <- paste0(path, ".trim")
+  writeLines(c(h, d[keep]), tmp)
+  if (!file.rename(tmp, path)) { unlink(tmp); stop("could not replace ", path) }
+  invisible(sum(!keep))
 }
 
 create_and_run_aermet_stage2 <- function(station_paths, start_year, end_year,
@@ -862,7 +884,8 @@ create_and_run_aermet_stage2 <- function(station_paths, start_year, end_year,
       fp <- file.path(station_dir, f)
       if (!file.exists(fp) || file.size(fp) == 0)
         stop(sprintf("Stage 2 output missing or empty: %s", f))
-      cat(sprintf("  created: %s\n", f))
+      n <- trim_to_calendar_year(fp, year, header = grepl("\\.sfc$", f))
+      cat(sprintf("  created: %s (%d trailing records of %d trimmed)\n", f, n, year + 1))
     }
   }
   cat("AERMET Stage 2 complete for all years\n")

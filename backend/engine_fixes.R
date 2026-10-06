@@ -59,8 +59,8 @@ parse_rp2_file <- function(rp2_file) {
 }
 
 # --- 2) duplicate hours across adjacent yearly .sfc files ---------------------
-# Since v1.5 (engine of 2026-10-06) Stage 2 is driven with XDATES <y>/01/01 TO
-# <y>/12/31 and each yearly .sfc holds calendar-year records only.  Files made by
+# Since v1.5 (engine of 2026-10-06) each yearly .sfc holds calendar-year records
+# only: Stage 2 still runs into 1 January, then the trailing day is trimmed.  Files made by
 # v1.4 or earlier, and MDEQ's published packages before the October 2026 reissue,
 # end with the 24 hours of 1 January of the FOLLOWING year.  This guard is kept
 # for reading those older files.
