@@ -22,7 +22,7 @@ if (!exists("APP_ROOT")) stop("APP_ROOT must be set before sourcing pipeline.R (
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
-RUNNER_VERSION <- "1.4"   # app version (app.R shows it; stamped into each dataset README)
+RUNNER_VERSION <- "1.5"   # app version (app.R shows it; stamped into each dataset README)
 
 # Per-run context read by the overridden seams (single-threaded Shiny session).
 pipeline_env <- new.env()

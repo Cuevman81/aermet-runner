@@ -17,6 +17,16 @@
 #             process_aermet_complete("KGLH", start_year=2021, end_year=2025)
 #
 # Previous ISHD-based version preserved as AERMET_24142_backup.R
+#
+# 2026-10-06 (review patch, not yet adopted):
+#   * Stage 2 XDATES now ends <y>/12/31, so each yearly .sfc/.pfl holds calendar-year
+#     records only.  It used to end <y+1>/01/01, which appended the 24 hours of
+#     1 January of the following year; joining yearly files then failed in AERMOD
+#     with MX E450 (record out of sequence).  Verified on KTUP 2025: the trimmed
+#     output is byte-identical to the calendar-year records of the old output.
+#   * verify_data_completeness() counts missing hours exactly as AERMOD 26135 does
+#     (metext.f CHKCLM then CHKMSG), verified against AERMOD itself for all 360
+#     station-quarters of the 2021-2025 set.
 # =====================================================================================
 
 library(httr)
@@ -798,7 +808,10 @@ create_stage2_content <- function(year, use_ustar, aersurf_file, station_code,
     "   MODEL       AERMOD",
     sprintf("   OUTPUT      %s%d%s.sfc", station_code, year, suffix),
     sprintf("   PROFILE     %s%d%s.pfl", station_code, year, suffix),
-    sprintf("   XDATES      %d/01/01 TO %d/01/01", year, year + 1),
+    # Calendar year only.  Stage 1 still extracts through <end+1>/01/01, because the
+    # last local-standard-time hours of 31 December need 1 January UTC observations;
+    # Stage 2 must not write those hours out as data.
+    sprintf("   XDATES      %d/01/01 TO %d/12/31", year, year),
     "   METHOD      REFLEVEL  SUBNWS",
     "   METHOD      WIND_DIR  RANDOM")
   if (use_ustar) content <- c(content, "   METHOD      STABLEBL  ADJ_U*")
@@ -877,6 +890,56 @@ verify_file_dates <- function(file_path, expected_year) {
                               expected_year, fmt_int(first_year)))
 }
 
+# An hour is "missing" exactly when AERMOD 26135 treats it as missing, so the
+# quarterly figures here are the ones a modeller will see in their own AERMOD run.
+# AERMOD (metext.f) first calls CHKCLM: an hour with UREF == 0 is CALM and is never
+# missing.  Otherwise CHKMSG flags it missing if ANY of these hold:
+#   wind speed >= 90 or < 0; wind direction > 900 or <= -9; temperature > 900 or <= 0;
+#   L < -99990; convective mixing height missing on a convective hour (L < 0);
+#   mechanical mixing height missing; u* < 0 or >= 9; w* < 0 on a convective hour.
+# The previous rule looked at wind and temperature only.  It missed every hour that
+# AERMET could not give a convective mixing height (no usable morning sounding) or a
+# Monin-Obukhov length, and so overstated completeness -- 15 of 360 quarters in the
+# 2021-2025 set passed on that rule and fail on AERMOD's.  That narrower count is kept
+# as missing_hours_wind_temp for comparison.
+# Calendar-year records only.
+aermod_hour_flags <- function(f) {
+  num <- function(i) suppressWarnings(as.numeric(f[i]))
+  us <- num(7); wst <- num(8); zic <- num(10); zim <- num(11); L <- num(12)
+  ws <- num(16); wd <- num(17); t <- num(19)
+  calm <- !is.na(ws) && ws == 0
+  chk <- c(ws >= 90 || ws < 0, wd > 900 || wd <= -9, t > 900 || t <= 0,
+           L < -99990, L < 0 && (zic > 90000 || zic < 0),
+           zim > 90000 || zim < 0, us < 0 || us >= 9,
+           wst < 0 && L < 0 && L > -99990)
+  miss <- !calm && (anyNA(c(ws, wd, t, L, zic, zim, us, wst)) || any(chk, na.rm = TRUE))
+  wt <- is.na(ws) || is.na(wd) || is.na(t) || ws %in% c(999, 9999) ||
+        wd %in% c(999, 9999) || t %in% c(999, 9999) || ws < 0 || wd < 0 || wd > 360
+  c(calm = calm, miss = miss, miss_wt = wt)
+}
+
+# Monthly completeness on the same AERMOD rule, for the PDF's diagnostic heatmap, so the
+# months always add up to the quarterly figures printed beside them.
+aermod_monthly_completeness <- function(station_dir, station_code, years) {
+  out <- matrix(NA_real_, length(years), 12, dimnames = list(years, month.abb))
+  for (yi in seq_along(years)) {
+    f <- file.path(station_dir, sprintf("%s%d.sfc", station_code, years[yi]))
+    if (!file.exists(f)) next
+    ln <- readLines(f, warn = FALSE)
+    ln <- ln[grep("^\\s*\\d{2,4}\\s+\\d{1,2}\\s+\\d{1,2}", ln)]
+    for (l in ln) {
+      fl <- strsplit(trimws(l), "\\s+")[[1]]
+      if (length(fl) < 20 || !year_matches(suppressWarnings(as.numeric(fl[1])), years[yi])) next
+      m <- as.integer(fl[2])
+      if (is.na(out[yi, m])) out[yi, m] <- 0
+      out[yi, m] <- out[yi, m] + !aermod_hour_flags(fl)[["miss"]]
+    }
+    hrs <- 24 * c(31, if (years[yi] %% 4 == 0) 29 else 28, 31,30,31,30,31,31,30,31,30,31)
+    out[yi, ] <- 100 * out[yi, ] / hrs
+  }
+  out
+}
+
 verify_data_completeness <- function(station_dir, station_code, start_year, end_year) {
   results <- list()
   quarters <- list(Q1 = 1:3, Q2 = 4:6, Q3 = 7:9, Q4 = 10:12)
@@ -894,30 +957,24 @@ verify_data_completeness <- function(station_dir, station_code, start_year, end_
     yr_res <- list(quarters = list())
     parsed <- lapply(data_lines, function(l) {
       f <- strsplit(trimws(l), "\\s+")[[1]]
-      if (length(f) < 19) return(NULL)
+      if (length(f) < 20) return(NULL)
       list(yr = suppressWarnings(as.numeric(f[1])),
            month = suppressWarnings(as.numeric(f[2])),
-           wspd = suppressWarnings(as.numeric(f[16])),
-           wdir = suppressWarnings(as.numeric(f[17])),
-           temp = suppressWarnings(as.numeric(f[19])))
+           flags = aermod_hour_flags(f))
     })
     parsed <- parsed[!sapply(parsed, is.null)]
+    parsed <- parsed[vapply(parsed, function(p) year_matches(p$yr, year), logical(1))]
     for (q in names(quarters)) {
       qm <- quarters[[q]]
-      tot <- 0; miss <- 0; calm <- 0
-      for (p in parsed) {
-        if (!year_matches(p$yr, year) || is.na(p$month) || !(p$month %in% qm)) next
-        tot <- tot + 1
-        if (!is.na(p$wspd) && p$wspd <= 0.5) calm <- calm + 1
-        if (is.na(p$wspd) || is.na(p$wdir) || is.na(p$temp) ||
-            p$wspd %in% c(999, 9999) || p$wdir %in% c(999, 9999) ||
-            p$temp %in% c(999, 9999) || p$wspd < 0 || p$wdir < 0 || p$wdir > 360)
-          miss <- miss + 1
-      }
+      inq <- vapply(parsed, function(p) !is.na(p$month) && p$month %in% qm, logical(1))
+      fl <- vapply(parsed[inq], function(p) p$flags, logical(3))
+      tot <- sum(inq)
       if (tot > 0) {
+        miss <- sum(fl["miss", ]); calm <- sum(fl["calm", ])
         pct <- (tot - miss) / tot * 100
         yr_res$quarters[[q]] <- list(expected_hours = tot, missing_hours = miss,
                                      calm_hours = calm,
+                                     missing_hours_wind_temp = sum(fl["miss_wt", ]),
                                      completeness_pct = round(pct, 1),
                                      meets_epa = pct >= 90)
       } else {
@@ -1270,7 +1327,10 @@ generate_verification_report <- function(results, station_code, start_year, end_
   # ---- 6. completeness ----
   rc <- c(rc, rule("-"), "6. DATA COMPLETENESS", rule("-"),
     "   EPA requires at least 90% valid data per calendar quarter.  The quarterly",
-    "   columns are the compliance test; the annual column is informational.", "",
+    "   columns are the compliance test; the annual column is informational.",
+    "   An hour counts as missing exactly when AERMOD 26135 treats it as missing",
+    "   (metext.f CHKMSG): missing wind speed, wind direction, temperature, L,",
+    "   mixing height, u* or w*.  Calm hours are valid data (CHKCLM).", "",
     "      Year       Q1       Q2       Q3       Q4     Annual   Result",
     "      ----   ------   ------   ------   ------   --------   ------")
   for (y in names(results$data_completeness)) {
@@ -1305,7 +1365,8 @@ generate_verification_report <- function(results, station_code, start_year, end_
 
   # ---- 8. calms and missing data ----
   rc <- c(rc, rule("-"), "8. CALMS AND MISSING DATA", rule("-"),
-    "   AERMOD excludes calm hours (wind speed below the 0.5 m/s threshold) and",
+    "   AERMOD excludes calm hours (wind speed written as 0, which AERMET assigns below",
+    "   the 0.5 m/s 1-minute threshold) and",
     "   missing hours from the averaging period, and reports both in its own output.",
     "   They are counted here so the modeller can anticipate them.", "",
     "      Year   Calm hrs   Missing hrs   Valid hrs",
@@ -1389,8 +1450,9 @@ read_sfc_data <- function(station_dir, station_code, years, suffix = "") {
   d <- do.call(rbind, out)
   # normalize 2-digit years from older AERMET versions
   d$year <- ifelse(!is.na(d$year) & d$year < 100, d$year + 2000, d$year)
-  # AERMET is driven with XDATES <y>/01/01 TO <y+1>/01/01, so every yearly .sfc
-  # ends with the 24 hours of 1 January of the FOLLOWING year (deliberate -- the
+  # Files made before the 2026-10-06 patch were driven with XDATES <y>/01/01 TO
+  # <y+1>/01/01, so each yearly .sfc ends with the 24 hours of 1 January of the
+  # FOLLOWING year (the published 2020-2024 and 2021-2025 packages; the
   # .sfc files themselves are left exactly as AERMET wrote them). Stacking the
   # yearly files therefore delivered 1 January twice for every year after the
   # first, which double-weighted that day in the report and pushed the reported
@@ -1584,9 +1646,9 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
   put("EPA-approved treatment for low-wind stable hours and generally lowers modelled concentrations;", x = 0.04, cex = 0.75)
   put("its use should be stated and justified in the modelling protocol.", x = 0.04, cex = 0.75)
   gap(0.3)
-  put("Each yearly .sfc ends with the 24 hours of 1 January of the FOLLOWING year.  That is how AERMET", x = 0.04, cex = 0.75)
-  put("writes the file for XDATES y/01/01 TO y+1/01/01 and is expected by AERMOD -- it is not duplicated", x = 0.04, cex = 0.75)
-  put("data within the year.", x = 0.04, cex = 0.75)
+  put("Each yearly .sfc/.pfl holds calendar-year records only, so the yearly files can be joined end", x = 0.04, cex = 0.75)
+  put("to end for a multi-year AERMOD run.  Completeness is counted exactly as AERMOD counts missing", x = 0.04, cex = 0.75)
+  put("hours: calms are valid; missing mixing heights, L, u* or w* count as missing.", x = 0.04, cex = 0.75)
 
   ## ---- Page 2: summary ----
   par(mar = c(1, 1, 2, 1))
@@ -1892,19 +1954,12 @@ generate_met_report_pdf <- function(station_dir, station_code, start_year, end_y
 
   ## ---- Page 11: completeness heatmap (monthly diagnostic) ----
   par(mfrow = c(1, 1), mar = c(4, 5, 4, 8))
-  compmat <- matrix(NA, length(years), 12,
-                    dimnames = list(years, month.abb))
-  for (yi in seq_along(years)) for (m in 1:12) {
-    sel <- d$year == years[yi] & d$month == m
-    nhr <- sum(sel)
-    if (nhr > 0) compmat[yi, m] <- 100 * sum(!is.na(d$ws[sel]) & !is.na(d$temp[sel])) /
-                                   (24 * c(31,28,31,30,31,30,31,31,30,31,30,31)[m])
-  }
+  compmat <- aermod_monthly_completeness(station_dir, station_code, years)
   compmat[compmat > 100] <- 100
   cols <- colorRampPalette(c("#b2182b", "#fddbc7", "#d1e5f0", "#2166ac"))(50)
   image(1:12, seq_along(years), t(compmat[rev(seq_along(years)), , drop = FALSE]),
         col = cols, zlim = c(50, 100), axes = FALSE, xlab = "", ylab = "",
-        main = "Monthly data completeness (% of hours with valid wind and temperature)")
+        main = "Monthly data completeness (% of hours AERMOD can use)")
   axis(1, 1:12, month.abb, cex.axis = 0.85)
   axis(2, seq_along(years), rev(years), las = 1)
   for (yi in seq_along(years)) for (m in 1:12)

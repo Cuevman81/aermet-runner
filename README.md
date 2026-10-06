@@ -86,15 +86,18 @@ the three EPA executables. The app auto-selects the right build:
 | OS | Binaries used | Status |
 |----|---------------|--------|
 | **Windows** | `bin/<tool>_26135.exe` (official EPA v26135) | ✅ works out of the box |
-| **macOS** | `bin/<tool>_26135_mac` | ⚠️ Intel build; needs Homebrew GCC* |
+| **macOS (Apple silicon)** | `bin/<tool>_26135_mac` | ✅ works out of the box* |
 | **Linux** | `bin/<tool>_26135_linux` | ⚠️ add binaries (see below) |
 
 - **Windows:** everything needed is bundled — clone and run.
-- **\*macOS:** the Mac builds are Intel (x86_64) and load the GCC runtime
-  libraries from an Intel Homebrew (`/usr/local/opt/gcc/lib/gcc/current`), so
-  install it once with `brew install gcc`. On Apple Silicon they need Rosetta 2
-  plus that Intel Homebrew under `/usr/local`; the Apple Silicon one in
-  `/opt/homebrew` can't serve an Intel binary.
+- **\*macOS:** since v1.5 the Mac builds are native Apple silicon (arm64),
+  compiled from EPA's 26135 source and statically linked, so nothing needs
+  installing (`otool -L` lists only macOS's own `libSystem`). They do **not** run
+  on an Intel Mac. There, compile AERMET, AERMINUTE and AERSURFACE from EPA source
+  (EPA's `gfortran-*.bat` order, plus
+  `-static-libgfortran -static-libgcc -static-libquadmath`) and replace the three
+  `_mac` files. The v1.4 Intel builds needed an Intel Homebrew GCC under
+  `/usr/local` and failed on Apple silicon without it.
 - **\*macOS Gatekeeper:** the Mac builds are unsigned, so the first run may be
   blocked. Clear the quarantine flag once: `xattr -dr com.apple.quarantine bin/`
   (or right-click each binary → Open).
@@ -364,17 +367,17 @@ to defend the data, not just what the pipeline happened to compute:
 
 ### Using the yearly files in AERMOD
 
-Each yearly `.sfc`/`.pfl` ends with the 24 hours of 1 January of the following
-year. That comes from the `XDATES y/01/01 TO y+1/01/01` convention MDEQ uses, and
-it matches MDEQ's production files byte for byte. AERMOD does **not** skip those
-hours on its own: "when the STARTEND keyword is omitted ... the default for the
-model is to read the entire meteorological data file" (AERMOD User's Guide 26135,
-§3.5.4). So:
+Since v1.5 each yearly `.sfc`/`.pfl` holds **calendar-year records only**
+(Stage 2 `XDATES y/01/01 TO y/12/31`), so yearly files can be joined end to end
+into one multi-year file and run without `STARTEND`.
 
-- modeling a single year: set `ME STARTEND y 1 1 y 12 31` (or AERMOD counts the
-  extra day in the annual and period averages);
-- stacking yearly files into one multi-year file: drop the last 24 records of each
-  year before concatenating, or 1 January appears twice at every join.
+Files made with v1.4 or earlier (and MDEQ packages published before October 2026)
+end with the 24 hours of 1 January of the following year. AERMOD does **not** skip
+those hours on its own: "when the STARTEND keyword is omitted ... the default for
+the model is to read the entire meteorological data file" (AERMOD User's Guide
+26135, §3.5.4). For those files, set `ME STARTEND y 1 1 y 12 31` for a single year,
+and drop the last 24 records of each year before concatenating; otherwise AERMOD
+stops with `MX E450 ... Record Out of Sequence`.
 
 The final year of a window also has no observations after 23:59 UTC on 31 December
 (the GHCNh by-year files are UTC years), so its last evening in local time (hours
@@ -424,6 +427,27 @@ The final year of a window also has no observations after 23:59 UTC on 31 Decemb
   with a fixed ice-free-wind date that is only safe after 2009.
 - Station metadata is parsed once per run instead of five or six times (about two
   minutes saved per station).
+
+### v1.5 corrections (2026-10-06)
+
+- **Calendar-year files.** Stage 2 now ends each year on 31 December (it ended on
+  1 January of the next year; see *Using the yearly files in AERMOD*). Stage 1
+  still extracts through the day after the window, because the last local hours
+  of 31 December need 1 January UTC observations. Re-running a year with the new
+  window gives output byte-identical to the calendar-year records of the old one
+  (checked on KTUP 2025).
+- **Completeness is counted the way AERMOD counts it.** An hour used to count as
+  missing only when wind speed, direction or temperature was missing. AERMOD 26135
+  (`metext.f`: `CHKCLM`, then `CHKMSG`) also loses every hour without a usable L,
+  convective mixing height (on convective hours), mechanical mixing height, u* or
+  w*, and never counts a calm as missing. The verification report, the PDF's
+  quarterly table and its monthly heatmap now use AERMOD's rule. The rule was
+  checked against AERMOD itself on all 360 station-quarters of MDEQ's 2021-2025
+  set, and agrees on every one. On that set it moved 15 quarters below 90%; the
+  usual cause is a missing morning sounding (no convective mixing height that day).
+- **Mac binaries** are native Apple silicon builds (see *Platform support*).
+- The SYNOP screen (screen 3) that v1.4 added to this engine is now also in
+  MDEQ's production `AERMET.R`; `backend/engine.R` is again a verbatim copy of it.
 
 ## AERSURFACE options
 

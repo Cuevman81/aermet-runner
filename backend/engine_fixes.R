@@ -59,9 +59,11 @@ parse_rp2_file <- function(rp2_file) {
 }
 
 # --- 2) duplicate hours across adjacent yearly .sfc files ---------------------
-# AERMET is driven with XDATES <y>/01/01 TO <y+1>/01/01, so every yearly .sfc ends
-# with the 24 hours of 1 January of the FOLLOWING year.  That is deliberate and
-# matches MDEQ production output byte for byte -- it is not changed here.
+# Since v1.5 (engine of 2026-10-06) Stage 2 is driven with XDATES <y>/01/01 TO
+# <y>/12/31 and each yearly .sfc holds calendar-year records only.  Files made by
+# v1.4 or earlier, and MDEQ's published packages before the October 2026 reissue,
+# end with the 24 hours of 1 January of the FOLLOWING year.  This guard is kept
+# for reading those older files.
 #
 # But read_sfc_data() rbinds the yearly files for the met report, so for every year
 # after the first, 1 January arrived twice: KBHM 2024 reported 8802 "valid hrs"
