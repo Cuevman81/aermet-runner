@@ -8,6 +8,8 @@ clean folder with a completeness report and a zip.
 It is designed to be **cloned and run locally** by any state's air-modeling
 program — no pre-staged land cover, no manual control files.
 
+![AERMET Runner: state map of ASOS stations, run options and the processing log](docs/screenshot.png)
+
 ---
 
 ## What it does
